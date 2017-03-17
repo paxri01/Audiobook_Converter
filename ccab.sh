@@ -48,6 +48,7 @@
 #
 #########################################################################################
 
+
 ### START OF USER OPTIONS ###
 
 targetBitrate=48                                 # Set this to desired bitrate for output files.
