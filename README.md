@@ -29,11 +29,11 @@
 **REQUIREMENTS:**  The following packages are require to use this script.  
 
    **ffmpeg & ffprobe**  : [https://ffmpeg.org/]  
-   **mid3v2**            : [http://mutagen.readthedocs.io/en/latest/man/mid3v2.html]
-   **fancy_audio**       : [https://rubygems.org/gems/fancy_audio/versions/0.0.4]
-   **googler**           : [https://github.com/jarun/googler]
-   **curl**              : *Your distro repository*
-   **lame**              : [http://lame.sourceforge.net/]
+   **mid3v2**            : [http://mutagen.readthedocs.io/en/latest/man/mid3v2.html]  
+   **fancy_audio**       : [https://rubygems.org/gems/fancy_audio/versions/0.0.4]  
+   **googler**           : [https://github.com/jarun/googler]  
+   **curl**              : *Your distro repository*  
+   **lame**              : [http://lame.sourceforge.net/]  
 
 
 **NOTE:** You will also need to modify the user parameters to set outgoing directories  
