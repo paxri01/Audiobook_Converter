@@ -31,6 +31,7 @@
 #             subdirectories or zero padded if more that 9 subs (ex.
 #             /disk 1 ==> /disk 01).
 #  -t       : Edit discovered IDv3 tags before writing.
+#  --trace  : Enable trace loggin during run.
 #  -v       : Will prompt for verification of detected book information.
 #
 #  NOTE: Other options are not fully implemented.
