@@ -10,19 +10,19 @@
 
    *-c || --concat*    : Will combine detected files into a single .mp3  
    *-m || --move*      : After re-encoding, will move new files to specified  
-                       directory (baseDir). May add option value on the command  
-                       line to avoid prompting if book type is know before hand  
-                       (-m #).  
+                         directory (baseDir). May add option value on the command  
+                         line to avoid prompting if book type is know before hand  
+                         (-m #).  
    *-mo*               : Will move previously encoded files to target directory.  
    *-mp3*              : Will limit search of input files to .mp3 files only.  
    *-m4b*              : Will limit search of input files to .m4a or .m4b files  
-                       only.  
+                         only.  
    *-r || --recurse*   : Will search subdirectories for input files, make sure  
-                       subdirectories or zero padded if more that 9 subs (ex.  
-                       /disk 1 ==> /disk 01).  
+                         subdirectories or zero padded if more that 9 subs (ex.  
+                         /disk 1 ==> /disk 01).  
    *-u || --update*    : Only update book information (title, info, etc.) for an  
-                       already converted book (eg. change series info, title).  
-   *-v || --verify*    : Will prompt for verification of detected book information. 
+                         already converted book (eg. change series info, title).  
+   *-v || --verify*    : Will prompt for verification of detected book information.  
    *-x || --remove*    : Remove source files after conversion (DANGEROUS!).  
 
 
