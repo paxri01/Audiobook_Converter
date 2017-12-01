@@ -62,10 +62,10 @@ convertLog=$logDir/converted.log                 # Successful encoding log file.
 ### END OF USER OPTIONS ###
 
 mkdir -p $logDir >/dev/null 2>&1
-umask 0022
+umask 0002
 
 # Declare global variables
-typeset bookAuthor bookGenre bookSeries bookTitle baseName bookType concatFiles fullName lookupResults lookupInfo outFile rPID
+typeset bookAuthor bookGenre bookSeries bookTitle baseName bookType fileList fullName lookupResults lookupInfo outFile rPID
 typeset -i i=0 j=0 concat=0 verify=0 move=0 moveOnly=0 recurse=0 update=0 remove=0 result=0
 
 startTime=$(date +%H:%M:%S\ on\ %b\ %d,\ %Y)
@@ -103,6 +103,13 @@ if [ "$#" -lt 1 ]; then
                         directory (baseDir). May add option value on the command
                         line to avoid prompting if book type is know before hand
                         (-m #).
+                         Move Catagories:
+                            1 = Romance
+                            2 = Hot
+                            3 = SciFi
+                            4 = Fantasy
+                            5 = Thriller
+                            6 = Misc
     -mo               : Will move previously encoded files to target directory.
     -mp3              : Will limit search of input files to .mp3 files only.
     -m4b              : Will limit search of input files to .m4a or .m4b files
@@ -229,10 +236,12 @@ displayIt ()
   padlength=100
 
   if (( $# > 1 )); then
-    echo -e "${C2}$Text1${C0} ${C7}$Text2${C0}"
+    # shellcheck disable=2059
+    printf "${C2}$Text1${C0} ${C7}$Text2${C0}"
     printf '%*.*s' 0 $((padlength - ${#Text1} - ${#Text2} - 7 )) "$pad"
   else
-    echo -e "${C2}${Text1}${C0}"
+    # shellcheck disable=2059
+    printf "${C2}${Text1}${C0}"
     printf '%*.*s' 0 $((padlength - ${#Text1} - 6 )) "$pad"
   fi
   rotate &
@@ -328,11 +337,12 @@ cleanUp ()
       while read LINE; do
         logIt "cleanUp" $LINENO "TRACE" "rm \"$(awk -F\"['']\" '{print $1}' <<< "$LINE")\""
         rm "$(awk -F"['']" '{print $1}' <<< "$LINE")"
-      done < "$concatFiles"
+      done < "$(grep '\.mp3' "$fileList")"
     fi
 
     logIt "cleanUp" $LINENO "TRACE" "rm *.cc"
-    rm -rf ccab_concat.mp3 $ccError ./*.cc >/dev/null 2>&1
+    # rm -rf ccab_concat.mp3 $ccError ./*.cc >/dev/null 2>&1
+    rm -rf ccab_concat.mp3 ./*.cc >/dev/null 2>&1
   fi
 
   echo -e "ccab finished @ $(date +%H:%M:%S\ on\ %b\ %d,\ %Y)" >> $ccLog
@@ -347,43 +357,45 @@ getFiles ()
   # Setup file lists
   tmpFileList=$logDir/tmpFileList.lst
   fileList=$logDir/fileList.lst
-  # Remove any previous run files
-  rm -f $tmpFileList $fileList >/dev/null 2>&1
 
   # Find all audio files in current or recursive directories.
   if (( moveOnly == 1 )); then
-    find -maxdepth 1 -iregex ".*\.abr[0-9][0-9].mp3" -fprintf $tmpFileList '%h/%f\n'
+    find -maxdepth 1 -iregex ".*\.abr[0-9][0-9].mp3" -fprintf $fileList '%h/%f\n'
   elif (( recurse == 1 )); then
-    logIt "getFiles" $LINENO "TRACE" "find -iregex '.*.$searchType' -fprintf $tmpFileList '%h/%f\\\\n'"
-    find -iregex "$searchType" -fprintf $tmpFileList '%h/%f\n'
+    logIt "getFiles" $LINENO "TRACE" "find -iregex '.*.$searchType' -fprintf $fileList '%h/%f\\\\n'"
+    find -iregex "$searchType" -fprintf $fileList '%h/%f\n'
   else
-    logIt "getFiles" $LINENO "TRACE" "find -maxdepth 1 -iregex '.*.$searchType' -fprintf $tmpFileList '%h/%f\\\\n'"
-    find -maxdepth 1 -iregex "$searchType" -fprintf $tmpFileList '%h/%f\n'
+    logIt "getFiles" $LINENO "TRACE" "find -maxdepth 1 -iregex '.*.$searchType' -fprintf $fileList '%h/%f\\\\n'"
+    find -maxdepth 1 -iregex "$searchType" -fprintf $fileList '%h/%f\n'
   fi
 
-  # Remove already converted files from list
-  if (( moveOnly == 0 && update == 0 )); then
-    sed -r -i '/(\.abr[0-9]{2,3}\.mp3$)/d' $tmpFileList
-  fi
-  # Remove already concatenated file from list
-  sed -i '/ccab_concat.mp3/d' $tmpFileList
+  # # Remove already converted files from list
+  # if (( moveOnly == 0 && update == 0 )); then
+  #   sed -r -i '/(\.abr[0-9]{2,3}\.mp3$)/d' $fileList
+  # fi
 
-  # Restructure list for use with ffmpeg
+  if (( concat == 1 )); then
+    # Remove already concatenated file from list
+    sed -i '/ccab_concat.mp3/d' $fileList
+    # Fix for apostropes in file name for ffmpeg
+    sed -i "s/'s/'\\\''s/g" $fileList
+    grep ' [1-9]\.' < "$fileList" | sort -h > $tmpFileList
+    grep -v ' [1-9]\.' "$fileList" | sort -h >> $tmpFileList
+    mv -f "$tmpFileList" "$fileList"
+    vim $fileList
+  fi
+  
+  # Restructure list for use with ffmpeg (build list as "file '<FILENAME>'")
   i=0
   while read FILE; do
     origFile[$i]=$FILE
     j=$((i+1))
     logIt "getFiles" $LINENO "info" "Source file $j = ${origFile[$i]}"
     if (( concat == 1 )); then
-      echo "file '$FILE'" >> $fileList
+      echo "file '$FILE'" >> ./ccab_concat.lst
     fi
     ((i++))
-  done < $tmpFileList
-
-  if (( concat == 1 )); then
-    # Fix for apostropes in file name for ffmpeg
-    sed -i "s/'s/'\\\''s/g" $fileList
-  fi
+  done < $fileList
 
   return 0
 }
@@ -396,16 +408,15 @@ checkFile ()
   inExt=$(echo "$inExt" | tr '[:upper:]' '[:lower:]')
   baseName="$(sed 's/\....$//' <<< "$in")"
   out="${baseName}.mp3"
-  concatFiles=$logDir/concatFiles.lst
   displayIt "Checking file:" "$in"
   logIt "checkFile" $LINENO "info" "in = $in"
   logIt "checkFile" $LINENO "info" "out = $out"
   logIt "checkFile" $LINENO "info" "inExt = $inExt"
   logIt "checkFile" $LINENO "info" "baseName = $baseName"
 
-  if (( concat == 1 )); then
-    echo "file '$out'" >> $concatFiles
-  fi
+  # if (( concat == 1 )); then
+  #   echo "file '$out'" >> "$concatFiles"
+  # fi
 
   if [[  $inExt = "m4b" || $inExt = "m4a" ]]; then
 
@@ -534,24 +545,19 @@ promptTags ()
 
 concatFiles ()
 {
-  # Temp files
-  tmpConcat=$logDir/tmpConcatFiles.lst
-
+  # set -x
   displayIt "Concatenating discovered audio files"
-  outCat="ccab_concat.mp3"
-  # Fix apostrophes in title for ffmpeg
-  sed -i "s/'s/'\\\''s/g" $concatFiles
-  # Sort files numerically, with or without leading 0
-  grep ' [1-9]\.' < "$concatFiles" | sort -h > $tmpConcat
-  grep -v ' [1-9]\.' $concatFiles | sort -h >> $tmpConcat
-  mv $tmpConcat $concatFiles
+
   # if (( verify == 1 )); then
   #   vi $concatFiles
   # fi
-  if [[ ! -s $outCat ]]; then
+
+  if [[ ! -s ./ccab_concat.mp3 ]]; then
     killWait 3 
-    ffmpeg -loglevel fatal -y -safe 0 -f concat -i $concatFiles -vn -sn -c copy "$outCat"
-    logIt "concatFiles" $LINENO "TRACE"  "ffmpeg -loglevel fatal -y -safe 0 -f concat -i $concatFiles -vn -sn -c copy \"$outCat\""
+    # Due to ffmpeg issues, must have concat list in same dir as concat files.
+    # ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn -c copy ccab_concat.mp3
+    ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn ccab_concat.mp3
+    logIt "concatFiles" $LINENO "TRACE"  "ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn -c copy ccab_concat.mp3"
     STATUS=$?
   else
     killWait 0
@@ -567,13 +573,13 @@ concatFiles ()
     while read LINE; do
       logIt "concatFiles" $LINENO "TRACE" "rm $(awk -F\' '{print $2}' <<< "$LINE")"
       rm "$(awk -F\' '{print $2}' <<< "$LINE")" 
-    done < $concatFiles
-    rm $concatFiles
+    done < ./ccab_concat.lst
   else
     logIt "concatFiles" $LINENO "OK  "  "Encode of concatenated file successful."
   fi
-  bookDuration=$(ffprobe "$outCat" 2>&1 |grep 'Duration' | awk -F',' '{print $1}' | awk '{print $2}')
+  bookDuration=$(ffprobe ./ccab_concat.mp3 2>&1 |grep 'Duration' | awk -F',' '{print $1}' | awk '{print $2}')
   logIt "concatFiles" $LINENO "info"  "Concatenated bookDuration = $bookDuration"
+  # set +x
   return 0
 }
 
@@ -668,7 +674,7 @@ convert ()
 
     # Add converted file to concat list if option set.
     if (( concat == 1 )); then
-      echo "file '$out'" >> $concatFiles
+      echo "file '$out'" >> "$fileList"
       rm ccab_concat.mp3 > /dev/null 2>&1
     fi
     killWait 0
@@ -819,7 +825,7 @@ lookupMP3 ()
   displayIt "Looking up:" "$searchString"
 
   logIt "lookupMP3" $LINENO "TRACE" "googler -n 5 --np -C -w goodreads.com \"$searchString\""
-  googler -n 5 --np -C -w goodreads.com "$searchString" > $lookupResults 2>>$ccError
+  scl enable rh-python35 -- googler -n 5 --np -C -w goodreads.com "$searchString" > $lookupResults 2>>$ccError
 
   while [[ ! -s $lookupResults ]]; do
     killWait 1 "No results found using $searchString"
@@ -833,7 +839,7 @@ lookupMP3 ()
 
     displayIt "Looking up:" "$searchString"
     echo -e "${C3}Searching for $searchString.${C0}"
-    googler -n 5 -C --np -w goodreads.com "$searchString" > $lookupResults
+    scl enable rh-python35 -- googler -n 5 -C --np -w goodreads.com "$searchString" > $lookupResults
     STATUS=$?
   done
   killWait 0
@@ -848,7 +854,7 @@ lookupMP3 ()
       if [[ $result -eq 6 ]]; then
         echo -e "${C3}Enter new search string: ${C0}\c"
         read searchString
-        googler -n 5 --np -C -w goodreads.com "$searchString" > $lookupResults 2>/dev/null
+        scl enable rh-python35 -- googler -n 5 --np -C -w goodreads.com "$searchString" > $lookupResults 2>/dev/null
         cat $lookupResults
         result=0
       elif [[ $result -eq 7 ]]; then
@@ -968,6 +974,14 @@ reEncode ()
   outFile[$j]="${baseName}.abr${bookBitrate}.mp3"
   logIt "reEncode" $LINENO "info" "outFile[$j] = ${outFile[$j]}"
 
+  # Check converted.log for already converted.
+  if [[ $(grep -c "${outFile[$j]}" "$convertLog") -gt 0 ]]; then
+    killWait 2 "$in already converted"
+    logIt "reEncode" $LINENO "WARN  " "${outFile[$j]} has already been converted."
+    # rm "$baseName"*
+    # exit 10
+  fi
+
   # Re-encode input file with my parameters.
   killWait 3 "Re-encoding $in"
   echo -e "${C2}"
@@ -991,6 +1005,7 @@ reEncode ()
     return $STATUS
   else
     logIt "reEncode" $LINENO "OK" "lame encoding successful."
+    echo "${outFile[$j]}" >> done.txt
     killWait 0
     return 0
   fi
@@ -998,6 +1013,7 @@ reEncode ()
 
 moveIt ()
 {
+  # set -x
   inFile="$1"
   logIt "moveIt" $LINENO "info" "inFile = $inFile"
 
@@ -1105,6 +1121,7 @@ moveIt ()
 
   displayIt "Moving to:" "$outDir"
   mkdir -p "$outDir" 1>>$ccError 2>&1
+  chown -R root:qnap "$baseDir/$bookType/$bookAuthorReverse"
 
   if [[ ! -e "$inFile" ]]; then
     killWait 1 "No '${baseName}*' files found to move."
@@ -1118,16 +1135,17 @@ moveIt ()
     return 1
   fi
 
-#  IFS=$'\n'
-#  for LINE in $(find . -name "${baseName}.*"); do
-#    logIt "moveIt" $LINENO "TRACE" "mv \"$LINE\" \"$outDir\""
-#    mv "$LINE" "$outDir" 1>>$ccError 2>&1
-#  done
-
-  while IFS= read -r -d '' LINE; do
+  IFS=$'\n'
+  # shellcheck disable=2044
+  for LINE in $(find . -name "${baseName}.*"); do
     logIt "moveIt" $LINENO "TRACE" "mv \"$LINE\" \"$outDir\""
     mv "$LINE" "$outDir" 1>>$ccError 2>&1
-  done < <(find . -name "${baseName}.*")
+  done
+
+#   while IFS= read -r -d '' LINE; do
+#     logIt "moveIt" $LINENO "TRACE" "mv \"$LINE\" \"$outDir\""
+#     mv "$LINE" "$outDir" 
+#   done < "$(find . -name "${baseName}*")"
   STATUS=$?
 
   if (( STATUS > 0 )); then
@@ -1135,6 +1153,7 @@ moveIt ()
     killWait 1 "Unable to move files to $outDir"
     return $STATUS
   else
+    chown -R root:qnap "$outDir"
     logIt "moveIt" $LINENO "OK" "Move encoded files to $outDir"
     rm $bookGenre $lookupInfo >/dev/null 2>&1
     killWait 0
@@ -1170,7 +1189,6 @@ if (( moveOnly == 1 )); then
   logIt "MAIN" $LINENO "FUNC" "calling cleanUp:  0"
   cleanUp 0
 fi
-
 # -----------------------------------------------
 # Update only.
 # -----------------------------------------------
@@ -1301,7 +1319,7 @@ if (( concat == 1 )); then
       mv "$bookAuthor - 00 - $bookTitle.cover.jpg" "$bookAuthor - $bookSeries - $bookTitle.cover.jpg" > /dev/null 2>&1
     fi
   fi
-  
+
   logIt "MAIN" $LINENO "FUNC" "calling reEncode:  \"${origFile[0]}\""
   reEncode "${origFile[0]}"
   STATUS=$?
