@@ -355,8 +355,8 @@ cleanUp ()
 getFiles ()
 {
   # Setup file lists
-  tmpFileList=$logDir/tmpFileList.lst
-  fileList=$logDir/fileList.lst
+  tmpFileList=tmpFileList.tmp
+  fileList=fileList.tmp
 
   # Find all audio files in current or recursive directories.
   if (( moveOnly == 1 )); then
@@ -377,12 +377,12 @@ getFiles ()
   if (( concat == 1 )); then
     # Remove already concatenated file from list
     sed -i '/ccab_concat.mp3/d' $fileList
-    # Fix for apostropes in file name for ffmpeg
-    sed -i "s/'s/'\\\''s/g" $fileList
-    grep ' [1-9]\.' < "$fileList" | sort -h > $tmpFileList
-    grep -v ' [1-9]\.' "$fileList" | sort -h >> $tmpFileList
+    grep ' [1-9]\.' < "$fileList" | sort -h > "$tmpFileList"
+    grep -v ' [1-9]\.' "$fileList" | sort -h >> "$tmpFileList"
     mv -f "$tmpFileList" "$fileList"
-    vim $fileList
+    if (( verify == 1 )); then
+      vim "$fileList"
+    fi
   fi
   
   # Restructure list for use with ffmpeg (build list as "file '<FILENAME>'")
@@ -395,7 +395,11 @@ getFiles ()
       echo "file '$FILE'" >> ./ccab_concat.lst
     fi
     ((i++))
-  done < $fileList
+  done < "$fileList"
+
+  # Fix for apostropes in file name for ffmpeg
+  sed -i "s/'s/'\\\''s/g" ./ccab_concat.lst
+  rm -f "$fileList"
 
   return 0
 }
@@ -579,7 +583,11 @@ concatFiles ()
   fi
   bookDuration=$(ffprobe ./ccab_concat.mp3 2>&1 |grep 'Duration' | awk -F',' '{print $1}' | awk '{print $2}')
   logIt "concatFiles" $LINENO "info"  "Concatenated bookDuration = $bookDuration"
+
+  rm -f ./ccab_concat.lst
+  
   # set +x
+
   return 0
 }
 
@@ -1107,7 +1115,7 @@ moveIt ()
   PS3=$PS3_Orig
 
   baseDir=$(sed 's/\/$//' <<< $baseDir)
-  outDir="$baseDir/$bookType/$bookAuthorReverse/$bookSeries - $bookTitle/"
+  outDir="$baseDir/$bookType/$bookAuthorReverse/$bookSeries - $bookTitle"
   logIt "moveIt" $LINENO "info" "outDir = $outDir"
 
   baseName="$bookAuthor - $bookSeries - $bookTitle"
@@ -1138,8 +1146,8 @@ moveIt ()
   IFS=$'\n'
   # shellcheck disable=2044
   for LINE in $(find . -name "${baseName}.*"); do
-    logIt "moveIt" $LINENO "TRACE" "mv \"$LINE\" \"$outDir\""
-    mv "$LINE" "$outDir" 1>>$ccError 2>&1
+    logIt "moveIt" $LINENO "TRACE" "mv \"$LINE\" \"$outDir/\""
+    mv "$LINE" "$outDir/" 1>>$ccError 2>&1
   done
 
 #   while IFS= read -r -d '' LINE; do
@@ -1154,6 +1162,7 @@ moveIt ()
     return $STATUS
   else
     chown -R root:qnap "$outDir"
+    chmod -R 644 "$outDir"
     logIt "moveIt" $LINENO "OK" "Move encoded files to $outDir"
     rm $bookGenre $lookupInfo >/dev/null 2>&1
     killWait 0
