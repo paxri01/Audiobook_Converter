@@ -347,6 +347,7 @@ cleanUp ()
 
   echo -e "ccab finished @ $(date +%H:%M:%S\ on\ %b\ %d,\ %Y)" >> $ccLog
   logIt "cleanUp" $LINENO "info" "exit status = $STATUS"
+  rm -f "$fileList"
 
   echo -e "${C1}\nDone!${C0}"
   exit "$STATUS"
@@ -397,9 +398,11 @@ getFiles ()
     ((i++))
   done < "$fileList"
 
-  # Fix for apostropes in file name for ffmpeg
-  sed -i "s/'s/'\\\''s/g" ./ccab_concat.lst
-  rm -f "$fileList"
+  if (( concat == 1 )); then
+    # Fix for apostropes in file name for ffmpeg
+    sed -i "s/'s/'\\\''s/g" ./ccab_concat.lst
+    rm -f "$fileList"
+  fi
 
   return 0
 }
@@ -1162,7 +1165,7 @@ moveIt ()
     return $STATUS
   else
     chown -R root:qnap "$outDir"
-    chmod -R 644 "$outDir"
+    chmod 664 "$outDir"/*
     logIt "moveIt" $LINENO "OK" "Move encoded files to $outDir"
     rm $bookGenre $lookupInfo >/dev/null 2>&1
     killWait 0
