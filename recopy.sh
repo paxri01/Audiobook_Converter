@@ -1,5 +1,9 @@
 #!/bin/bash
 
+## DESCRIPTION:  This script will simply re-copy existing audio files (mp3) and
+##               organize ID3 tags to v2.4, default for ffmpeg. It does not 
+##               change the original audio stream.
+
 inFileExt=${1:-'mp3'}
 
 deadJim()

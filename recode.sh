@@ -1,5 +1,17 @@
 #!/bin/bash
 
+## DESCRIPTION:
+##          This script will convert .flac files to .mp3 (leaving existing
+##          .flac files in-place).  This script will also normalize the
+##          the audio to typical levels.
+##
+## REQUIRED PACKAGES:
+##          - ffmpeg (w/libmp3lame encoder & loudnorm enabled)
+##          - mediainfo (to display audio differences)
+##
+## DATE:    2019.12.30 - rlp
+##
+
 inFileExt=${1:-'flac'}
 
 deadJim()
@@ -42,7 +54,7 @@ while [[ $i -lt ${#inFile[*]} ]]; do
   input_lra=$(jq .input_lra < sample.json | tr -d '"')
   input_thresh=$(jq .input_thresh < sample.json | tr -d '"')
   
-  ## Desired output level of the file.
+  ## Desired output level of the file. (Change to match your preferences)
   outLevel="linear=true:I=-16:TP=-1.5:LRA=11"
   ## Set measured levels.
   aOpts="-filter_complex loudnorm=${outLevel}:measured_I=$input_i:measured_tp=$input_tp:measured_LRA=$input_lra:measured_thresh=${input_thresh}[aOut]"
@@ -51,14 +63,16 @@ while [[ $i -lt ${#inFile[*]} ]]; do
 
   echo -e "Re-encoding ${inFile[$i]}..."
   #shellcheck disable=SC2086,SC2090
-  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" -c:a libmp3lame -q:a 1 \
-    $aOpts -ar 48k -map [aOut] -metadata $metaData "${outFile[$i]}"
-#  file "${inFile[$i]}"
-#  file "${outFile[$i]}" | sed 's/\.\/mp3\///'
+  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" \
+    -c:a libmp3lame -q:a 1 $aOpts -ar 48k -map [aOut] \
+    -metadata $metaData "${outFile[$i]}"
+
+  ## Display audio characteristics between in and out files.
   echo -e "\n< inFile: ${inFile[$i]}"
   mediainfo "${inFile[$i]}" | sed -n '/^Audio/,/^Writing/p'
   echo -e "\n> outFile: ${inFile[$i]}"
   mediainfo "${outFile[$i]}" | sed -n '/^Audio/,/^Writing/p'
+
   rm ./sample.json
   ((i++))
 done
