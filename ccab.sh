@@ -19,6 +19,7 @@
 #  USAGE:   ccab.sh [-c ||--concat] [-m ||--move] [-mo] [-mp3] [-m4b] [-r] [-t] [-v]
 #
 #  -c || --concat : Will combine detected files into a single .mp3
+#  -d || --debug  : Enable debug output.
 #  -m || --move   : After re-encoding, will move new files to specified
 #                   directory (baseDir). May add option value on the command
 #                   line to avoid prompting if book type is know before hand
@@ -38,10 +39,8 @@
 #
 #########################################################################################
 #
-#  TRACING: The details of the file processing is logged to $ccLog output for
-#           debugging or tracing processing. $ccError has limited value as 
-#           only odd errors typically get logged to it, but may be worth
-#           checking if problems occur.
+#  DEBUG: Debug output can be enable by specifying the -d or --debug option
+#         along with the level of debug [1 or 2].
 #
 #  CONVERTED: If $convertLog specified, successful encodes will be logged to
 #             this file, to track what files have been processed.
@@ -52,53 +51,46 @@
 ### START OF USER OPTIONS ###
 
 targetBitrate=48                                 # Set this to desired bitrate for output files.
-ffOptions="-loglevel fatal -hide_banner -y"      # Don't change this unless you know ffmpeg.
-logDir=/mnt/vuze/logs/ccab                            # Working directory (logs and such)
-baseDir=/nas/audiobooks                          # Base directory to move encoded files to.
-ccLog=$logDir/ccab.log                           # Output log file.
-ccError=$logDir/ccab-error.log                   # Output tracing file.
-convertLog=$logDir/converted.log                 # Successful encoding log file.
+logDir=/var/log/ccab                             # Working directory (logs and such)
+baseDir=/audio/audiobooks                        # Base directory to move encoded files to.
+convertLog="$logDir/converted.log"               # Successful encoding log file.
+logFile="$logDir/ccab.log"                       # Normal log file
+traceFile="$(date +%F)_trace.log"                # Debug log
+workDir=/tmp/ccab.tmp
 
 ### END OF USER OPTIONS ###
 
-mkdir -p $logDir >/dev/null 2>&1
-umask 0002
+mkdir -p "$logDir" >/dev/null 2>&1
+mkdir -p "$workDir" >/dev/null 2>&1
+#umask 0022
 
 # Declare global variables
 typeset bookAuthor bookGenre bookSeries bookTitle baseName bookType fileList fullName lookupResults lookupInfo outFile rPID
-typeset -i i=0 j=0 concat=0 verify=0 move=0 moveOnly=0 recurse=0 update=0 remove=0 result=0
-
-startTime=$(date +%H:%M:%S\ on\ %b\ %d,\ %Y)
-cat <<EOH >> $ccLog
-ccab log started @ $startTime
- DATE    TIME      MODULE    LINE #   STATUS  MESSAGE
------- -------- ------------ ------- -------- ---------------------------------
-EOH
+typeset -i i=0 j=0 concat=0 verify=0 move=0 moveOnly=0 recurse=0 update=0 remove=0 result=0 debug_level=0
 
 options=$*
 searchType=".*\(mp3\|m4a\|m4b\)$"
 
 # Remove any previous run temp files.
-rm ./*.cc > /dev/null 2>&1
+## rm ./*.cc > /dev/null 2>&1
 
 trap 'abort' 1 2 3 15
 
 C1="$(printf '\033[38;5;040m')"  # Green
-C2="$(printf '\033[38;5;243m')"  # Grey
-C3="$(printf '\033[38;5;254m')"  # White
+C2="$(printf '\033[38;5;236m')"  # Grey
+C3="$(printf '\033[38;5;254m')"  # Hi-Lite
 C4="$(printf '\033[38;5;184m')"  # Yellow
 C5="$(printf '\033[38;5;160m')"  # Red
-C6="$(printf '\033[38;5;165m')"  # Purple
+C6="$(printf '\033[38;5;164m')"  # Purple
 C7="$(printf '\033[38;5;063m')"  # Blue
+C8="$(printf '\033[38;5;240m')"  # Lt Grey
 C0="$(printf '\033[0;00m')"      # Reset
-
 
 # Check for command line arguments.
 if [ "$#" -lt 1 ]; then
   cat << EOM
-  USAGE:   ccab.sh [-c ||--concat] [-m ||--move] [-mo] [-mp3] [-m4b] [-r] [-v]
-
     -c || --concat    : Will combine detected files into a single .mp3
+    -d || --debug     : Enable debug output (must specify level [1 or 2]
     -m || --move      : After re-encoding, will move new files to specified
                         directory (baseDir). May add option value on the command
                         line to avoid prompting if book type is know before hand
@@ -147,13 +139,22 @@ command -v lame >/dev/null 2>&1 || { echo "ERROR: Unable to detect lame, bailing
 while [[ $# -gt 0 ]]; do
   key="$1"
   case $key in
-    -b | --bitrate)  # Target bitrate
+    -b | --bitrate) # Target bitrate
    targetBitrate=${2:-48}
    shift 2
    ;;
-    -c | --concat)  # Concat all files found
+    -c | --concat) # Concat all files found
       concat=1
       shift
+      ;;
+    -d | --debug) # Set debug level
+      if [[ -n $2 ]]; then
+        debug_level=$2
+        shift 2
+      else
+        debug_level=1
+        shift
+      fi
       ;;
     -m | --move)  # Move output files to defined location
       move=1
@@ -172,6 +173,10 @@ while [[ $# -gt 0 ]]; do
       ;;
     -mp3) # only search for mp3 files
       searchType=".*\(mp3\)$"
+      shift
+      ;;
+    -flac) # only search for mp3 files
+      searchType=".*\(flac\)$"
       shift
       ;;
     -m4b) # only search for m4a/m4b files
@@ -198,10 +203,6 @@ while [[ $# -gt 0 ]]; do
       remove=1
       shift
       ;;
-    --trace)        # Set tracing in log file
-      trace=1
-      shift
-      ;;
     *)  # Unknown option
       echo -e "${C5}ERROR: 10 - Unknown option '$1'${C0}"
       exit 10
@@ -214,15 +215,17 @@ done
 # -----------------------------------------------
 logIt ()
 {
-  module=$(printf '%-11s' "$1")
-  lineNo=$(printf '%.5d' "$2")
-  status=$(printf '%-6s' "$3")
-  msg=$4
+  msg=$1
+  if (( debug_level > 0 )); then
+    echo -e "${C8} INFO: $msg${C0}" | tee -a "$logFile"
+  fi
+}
 
-  if [[ $status == "TRACE " && $trace -eq 1 ]]; then
-    echo -e "$(date +%b\ %d\ %H:%M:%S) $module: [$lineNo] [$status] $msg" >> $ccLog
-  elif [[ $status != "TRACE " ]]; then
-    echo -e "$(date +%b\ %d\ %H:%M:%S) $module: [$lineNo] [$status] $msg" >> $ccLog
+debugIt()
+{
+  msg=$1
+  if (( debug_level > 1 )); then
+    echo -e "${C2}DEBUG: $msg${C0}" | tee -a "$traceFile"
   fi
 }
 
@@ -244,8 +247,8 @@ displayIt ()
     printf "${C2}${Text1}${C0}"
     printf '%*.*s' 0 $((padlength - ${#Text1} - 6 )) "$pad"
   fi
-  rotate &
-  rPID=$!
+#  rotate &
+#  rPID=$!
   return 0
 }
 
@@ -256,6 +259,7 @@ rotate ()
 
   trap 'abort' 1 2 3 15
 
+  #shellcheck disable=SC1003
   while : 
   do
     tput civis
@@ -319,65 +323,61 @@ killWait ()
   return 0
 }
 
-abort ()
+abort()
 {
-  killWait 1 "User abort detected!"
+  #killWait 1 "User abort detected!"
   tput cnorm
   # rm cc.log error.log *.url *.info
   # rm cc.log
   exit 9
 }
 
-cleanUp ()
+cleanUp()
 {
   STATUS=$1
 
   if (( STATUS == 0 )); then
     if (( concat == 1 && m4bFile == 1 )); then
-      while read LINE; do
-        logIt "cleanUp" $LINENO "TRACE" "rm \"$(awk -F\"['']\" '{print $1}' <<< "$LINE")\""
-        rm "$(awk -F"['']" '{print $1}' <<< "$LINE")"
+      while read -r LINE; do
+        echo -e " INFO: rm \"$(awk -F\"['']\" '{print $1}' <<< "$LINE")\""
+        ## rm "$(awk -F"['']" '{print $1}' <<< "$LINE")"
       done < "$(grep '\.mp3' "$fileList")"
     fi
 
-    logIt "cleanUp" $LINENO "TRACE" "rm *.cc"
-    # rm -rf ccab_concat.mp3 $ccError ./*.cc >/dev/null 2>&1
-    rm -rf ccab_concat.mp3 ./*.cc >/dev/null 2>&1
+    echo -e " INFO: Cleaning temp files"
+    #rm -f ccab_concat.mp3 ccab_concat.lst >/dev/null 2>&1
+    rm -rf "$workDir" >/dev/null 2>&1
   fi
 
-  echo -e "ccab finished @ $(date +%H:%M:%S\ on\ %b\ %d,\ %Y)" >> $ccLog
-  logIt "cleanUp" $LINENO "info" "exit status = $STATUS"
-  rm -f "$fileList"
-
-  echo -e "${C1}\nDone!${C0}"
+  echo -e "${C1}\nDone!${C0} STATUS: ${C3}$STATUS${C0}"
   exit "$STATUS"
 }
 
-getFiles ()
+getFiles()
 {
   # Setup file lists
-  tmpFileList=tmpFileList.tmp
-  fileList=fileList.tmp
+  tmpFileList=$workDir/ccab_files.tmp
+  fileList=$workDir/ccab_files.list
 
   # Find all audio files in current or recursive directories.
   if (( moveOnly == 1 )); then
-    find -maxdepth 1 -iregex ".*\.abr[0-9][0-9].mp3" -fprintf $fileList '%h/%f\n'
+    debugIt "find -maxdepth 1 -iregex '.*\\.abr[0-9][0-9]\\.mp3' \
+      -fprintf $fileList '%h/%f\\n'"
+    find . -maxdepth 1 -iregex ".*\.abr[0-9][0-9].mp3" -fprintf "$fileList" '%h/%f\n'
   elif (( recurse == 1 )); then
-    logIt "getFiles" $LINENO "TRACE" "find -iregex '.*.$searchType' -fprintf $fileList '%h/%f\\\\n'"
-    find -iregex "$searchType" -fprintf $fileList '%h/%f\n'
+    debugIt "find -iregex '.*.$searchType' \
+      -fprintf $fileList '%h/%f\\n'"
+    find . -iregex "$searchType" -fprintf "$fileList" '%h/%f\n'
   else
-    logIt "getFiles" $LINENO "TRACE" "find -maxdepth 1 -iregex '.*.$searchType' -fprintf $fileList '%h/%f\\\\n'"
-    find -maxdepth 1 -iregex "$searchType" -fprintf $fileList '%h/%f\n'
+    debugIt "find -maxdepth 1 -iregex '.*.$searchType' \
+      -fprintf $fileList '%h/%f\\n'"
+    find . -maxdepth 1 -iregex "$searchType" -fprintf "$fileList" '%h/%f\n'
   fi
-
-  # # Remove already converted files from list
-  # if (( moveOnly == 0 && update == 0 )); then
-  #   sed -r -i '/(\.abr[0-9]{2,3}\.mp3$)/d' $fileList
-  # fi
 
   if (( concat == 1 )); then
     # Remove already concatenated file from list
-    sed -i '/ccab_concat.mp3/d' $fileList
+    logIt "[getFiles.$LINENO] Sorting ${C3}$fileList${C0}"
+    sed -i '/ccab_concat.mp3/d' "$fileList"
     grep ' [1-9]\.' < "$fileList" | sort -h > "$tmpFileList"
     grep -v ' [1-9]\.' "$fileList" | sort -h >> "$tmpFileList"
     mv -f "$tmpFileList" "$fileList"
@@ -388,10 +388,10 @@ getFiles ()
   
   # Restructure list for use with ffmpeg (build list as "file '<FILENAME>'")
   i=0
-  while read FILE; do
+  while read -r FILE; do
     origFile[$i]=$FILE
     j=$((i+1))
-    logIt "getFiles" $LINENO "info" "Source file $j = ${origFile[$i]}"
+    logIt "[getFiles.$LINENO] Concat file [$j]: ${C3}${origFile[$i]}${C0}"
     if (( concat == 1 )); then
       echo "file '$FILE'" >> ./ccab_concat.lst
     fi
@@ -400,14 +400,93 @@ getFiles ()
 
   if (( concat == 1 )); then
     # Fix for apostropes in file name for ffmpeg
+    debugIt "sed -i \"s/'s/'\\\'s/g\" ./ccab_concat.lst"
     sed -i "s/'s/'\\\''s/g" ./ccab_concat.lst
-    rm -f "$fileList"
+    sed -i "s/'v/'\\\''v/g" ./ccab_concat.lst
+    #rm -f "$fileList"
   fi
 
   return 0
 }
 
-checkFile ()
+probeFile()
+{
+  # Gather information on the book (title, series, info, etc.).
+
+  # set -x
+  in="$1"
+
+  logIt "[probeFile.$LINENO] Collecting ID tag information for: ${C3}$in${C0}"
+
+  ffprobe -hide_banner "$in" >"./probe.tmp" 2>&1
+
+  title=$(grep -m 1 'title' ./probe.tmp | awk -F':' '{ print $2 }' | cut -c 2-)
+  artist=$(grep 'artist' ./probe.tmp | awk -F':' '{ print $2 }' | cut -c 2-)
+  album=$(grep 'album' ./probe.tmp | awk -F':' '{ print $2 }' | cut -c 2-)
+  albumArtist=$(grep 'album_artist' ./probe.tmp | awk -F':' '{ print $2 }' | cut -c 2-)
+  date=$(grep 'date' ./probe.tmp | awk -F':' '{ print $2 }' | cut -c 2-)
+
+  ## Set bookTitle to album if set, otherwise title.
+  bookTitle="${album:-$title}"
+#    # Various filters to strip tags to base bookTitle.
+#    bookTitle=$(sed -r 's/^Ch[0-9]{2}\s-\s//' <<< "$bookTitle")
+#    bookTitle=$(sed -r 's/^Track\s[0-9]{1,2}//' <<< "$bookTitle")
+#    bookTitle=$(sed -r 's/^[0-9]{2}.[0-9]{2}\s//' <<< "$bookTitle")
+#    bookTitle=$(sed -r 's/ [0-9]{2}.*$//' <<< "$bookTitle")
+  if [[ -z $bookTitle ]]; then
+    echo -e "${C3}Enter the title of the book${C0} [$bookTitle]: \c"
+    read -r tempTitle
+    bookTitle=${tempTitle:-$bookTitle}
+  fi
+  logIt "[probeFile.$LINENO] bookTitle = ${C3}$bookTitle${C0}"
+
+  ## Set bookAuthor to album_artist if set, otherwise artist.
+  bookAuthor="${albumArtist:-$artist}"
+  ## Fix accented names
+  bookAuthor=${bookAuthor/É/E}
+  if [[ -z $bookAuthor ]]; then
+    echo -e "${C3}Enter the author of the book${C0} [$bookAuthor]: \c"
+    read -r tempAuthor
+    bookTitle=${tempAuthor:-$bookAuthor}
+  fi
+  logIt "[probeFile.$LINENO] bookTitle = ${C3}$bookTitle${C0}"
+
+  logIt "[probeFile.$LINENO] bookAuthor = ${C3}$bookAuthor${C0}"
+  
+  ## Reverse author name and strip any ending '.'
+  bookAuthorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$bookAuthor" | sed 's/\.$//')
+  logIt "[probeFile.$LINENO] bookAuthorReverse = ${C3}$bookAuthorReverse${C0}"
+
+  ## Set book duration
+  bookDuration=$(grep -m 1 'Duration' ./probe.tmp | sed -rn 's/.*([0-9]{2}:[0-9]{2}:[0-9]{2}\.[0-9]{2}).*/\1/p')
+  logIt "[probeFile.$LINENO] bookDuration = ${C3}$bookDuration${C0}"
+
+  origBitrate=$(grep 'Audio:' ./probe.tmp | awk -F',' '{ print $5 }' | awk '{ print $1 }')
+  if (( origBitrate > targetBitrate )); then
+    bookBitrate=$targetBitrate
+  elif (( bookBitrate > 40 )); then
+    bookBitrate=48
+  else
+    bookBitrate=32
+  fi
+  logIt "[probeFile.$LINENO] Original bookBitrate = ${C3}$origBitrate${C0}"
+  logIt "[probeFile.$LINENO] Adjusted bookBitrate = ${C3}$bookBitrate${C0}"
+
+  bookDate="$date"
+  logIt "[probeFile.$LINENO] bookDate = ${C3}$bookDate${C0}"
+
+  if [[ -z $bookTitle || -z $bookAuthor ]]; then
+    echo -e "${C5}ERROR:${C0} No book information found."
+    rm ./probe.tmp
+    return 1
+  else
+    logIt "[probeFile.$LINENO] Found book information."
+    rm ./probe.tmp
+    return 0
+  fi
+}
+
+checkFile()
 {
   # Function to strip file name and determine type for further processing.
   in="$1"
@@ -415,270 +494,189 @@ checkFile ()
   inExt=$(echo "$inExt" | tr '[:upper:]' '[:lower:]')
   baseName="$(sed 's/\....$//' <<< "$in")"
   out="${baseName}.mp3"
-  displayIt "Checking file:" "$in"
-  logIt "checkFile" $LINENO "info" "in = $in"
-  logIt "checkFile" $LINENO "info" "out = $out"
-  logIt "checkFile" $LINENO "info" "inExt = $inExt"
-  logIt "checkFile" $LINENO "info" "baseName = $baseName"
 
-  # if (( concat == 1 )); then
-  #   echo "file '$out'" >> "$concatFiles"
-  # fi
+  logIt "[checkFile.$LINENO] Checking file: ${C3}$in${C0}"
+  debugIt "\$in = $in"
+  debugIt "\$out = $out"
+  debugIt "\$inExt = $inExt"
+  debugIt "\$baseName = $baseName"
 
   if [[  $inExt = "m4b" || $inExt = "m4a" ]]; then
 
     if [[ -s $out || -s ccab_concat.mp3 ]]; then
       # File already converted.
-      logIt "checkFile" $LINENO "  ok" "$in previously converted."
+      echo -e "${C4}WARNING: ${C3}$in${C0} previously converted."
       
-      if (( concat == 1 )); then
-        # Check if next file the same as $out to avoid duplicates.
-        i=$((j+1))
-        if [[ ${origFile[$i]} = "$out" ]]; then
-          logIt "checkFile" $LINENO "TRACE" "unset origFile[$i]"
-          unset origFile[$i]
-        fi
-      fi
+      #return 3
+      return 1
 
-      killWait 2 "$in already processed, skipping."
-      return 3
     else
       # Need to convert.
-      logIt "checkFile" $LINENO "info" "Need to convert $in."
-      killWait 0
+      logIt "[checkFile.$LINENO] ${C3}$in${C0} needs to be converted."
       return 1
     fi
+
   else 
+
     if [[ $(find . -path "${baseName}.abr??.mp3" | wc -l) -gt 0 ]]; then
-      # mp3 file already encoded.
-      logIt "checkFile" $LINENO "WARN" "$in already encoded."
-      killWait 2 "$in already converted."
-      return 0
+      # m4a/m4b file already encoded.
+      logIt "[checkFile.$LINENO] ${C3}$in${C0} already encoded."
+      #return 0
+      return 2
     else
-      logIt "checkFile" $LINENO "info" "$in already in .mp3 format, skipping."
-      killWait 0
+      # m4a/m4b file already converted to mp3 format 
       return 2
     fi
+
   fi
 }
 
-probeFile ()
-{
-  # Gather information on the book (title, series, info, etc.).
-
-  # set -x
-  in="$1"
-  logIt "probeFile" $LINENO "info "  "Incoming file = $in"
-
-  displayIt "Collecting tag information"
-
-  # Get Book Title from IDv3 tags (if available)
-  bookTitle=$(ffprobe "$in" 2>&1 | grep -e '^ \{4\}title' | sed 's/  //g' | sed 's/title : //')
-    # Various filters to strip tags to base book title.
-    bookTitle=$(sed -r 's/^Ch[0-9]{2}\s-\s//' <<< "$bookTitle")
-    bookTitle=$(sed -r 's/^Track\s[0-9]{1,2}//' <<< "$bookTitle")
-    bookTitle=$(sed -r 's/^[0-9]{2}.[0-9]{2}\s//' <<< "$bookTitle")
-    # bookTitle=$(echo $bookTitle | sed -r 's/ [0-9]{2}.*$//')
-  logIt "probeFile" $LINENO "info "  "bookTitle = $bookTitle"
-
-  # Get Book Author
-  bookAuthor=$(ffprobe "$in" 2>&1 | grep -e '^ \{4\}artist' | sed 's/  //g' | sed 's/artist: //')
-  logIt "probeFile" $LINENO "info "  "bookAuthor = $bookAuthor"
-  bookAuthorReverse=$(echo "$bookAuthor" | awk '{$1=$NF", "$1;NF--} 1' | sed 's/\.$//')
-  logIt "probeFile" $LINENO "info "  "bookAuthorReverse = $bookAuthorReverse"
-
-  # Get Book Series
-  bookSeries=$(ffprobe "$in" 2>&1 | grep -e '^ \{4\}album\s*:' | sed 's/  //g' | sed 's/album : //')
-  logIt "probeFile" $LINENO "info "  "bookSeries = $bookSeries"
-
-  bookDuration=$(ffprobe "$in" 2>&1 |grep 'Duration' | awk -F',' '{print $1}' | awk '{print $2}')
-  logIt "probeFile" $LINENO "info "  "bookDuration = $bookDuration"
-  bookBitrate=$(ffprobe "$in" 2>&1 |grep 'Duration' | awk -F',' '{print $3}' | awk '{print $2}')
-  logIt "probeFile" $LINENO "info "  "Original bookBitrate = $bookBitrate"
-  if (( bookBitrate > targetBitrate )); then
-    bookBitrate=$targetBitrate
-  elif (( bookBitrate > 40 )); then
-    bookBitrate=48
-  else
-    bookBitrate=32
-  fi
-  logIt "probeFile" $LINENO "info "  "Adjusted bookBitrate = $bookBitrate"
-  bookSize=$(ffprobe -v error -select_streams a:0 -show_entries format=size -of default=noprint_wrappers=1 "$in" 2>>$ccError | awk -F '=' '{print $2}')
-  bookSize="$(echo "scale=2;$bookSize/1048576" | bc) MB"
-  logIt "probeFile" $LINENO "info "  "bookSize = $bookSize"
-  audioStream=$(ffprobe "$in" 2>&1 | grep -E 'Stream.*Audio' | sed 's/^.*Stream //')
-  logIt "probeFile" $LINENO "info "  "audioStream = $audioStream"
-  bookSample=$(ffprobe -v error -select_streams a:0 -show_entries stream=sample_rate -of default=noprint_wrappers=1 "$in" 2>>$ccError | awk -F '=' '{print $2}')
-  bookSample=$(echo "scale=2;$bookSample/1000" | bc)
-  logIt "probeFile" $LINENO "info "  "bookSample = $bookSample"
-  bookDate=$(ffprobe "$in" 2>&1 | grep '^\s\{4\}date\s*:' | awk -F': ' '{print $2}')
-  logIt "probeFile" $LINENO "info "  "bookDate = $bookDate"
-
-  if [[ -z $bookTitle || -z $bookAuthor ]]; then
-    logIt "probeFile" $LINENO "WARN "  "No book information found."
-    killWait 2 "No book information found for $in."
-    return 1
-  else
-    killWait 0
-    return 0
-  fi
-}
-
-promptTags ()
+promptTags()
 {
   echo -e "${C3}Collect ID3 tags for $1${C0}"
   tempTitle=$bookTitle
-  echo -e "${C3}  Please enter a title for this book: [${C4}${tempTitle}${C3}]${C0}\c"
-  read bookTitle
+  echo -e "${C3}  Please enter a title for this book [${C4}${tempTitle}${C3}]${C0}: \c"
+  read -r bookTitle
   bookTitle=${bookTitle:-$tempTitle}
-  logIt "promptTags" $LINENO "info "  "bookTitle = $bookTitle"
 
   tempAuthor=$bookAuthor
-  echo -e "${C3}  Please enter an author for this book: [${C4}${tempAuthor}${C3}]${C0}\c"
-  read bookAuthor
+  echo -e "${C3}  Please enter an author for this book [${C4}${tempAuthor}${C3}]${C0}: \c"
+  read -r bookAuthor
   bookAuthor=${bookAuthor:-$tempAuthor}
-  logIt "promptTags" $LINENO "info "  "bookAuthor = $bookAuthor"
 
-  #TODO add logic for no series
-# tempSeries=$bookSeries
-# echo -e "${C3}  Please enter the series for this book: [${C4}${tempSeries}${C3}]${C0}\c"
-# read bookSeries
-# bookSeries=${bookSeries:-$tempSeries}
-  
   fullName="$bookAuthor - $bookSeries - $bookTitle"
-  logIt "promptTags" $LINENO "info "  "fullName = $fullName"
+  echo -e " INFO: bookTitle = ${C3}$bookTitle${C0}"
+  echo -e " INFO: bookAuthor = ${C3}$bookAuthor${C0}"
+  echo -e " INFO: fullName = ${C3}$fullName${C0}"
+
   return 0
 }
 
-concatFiles ()
+concatFiles()
 {
-  # set -x
-  displayIt "Concatenating discovered audio files"
-
-  # if (( verify == 1 )); then
-  #   vi $concatFiles
-  # fi
+  # Function to concatenate separate files into single file
+  echo -e "${C3}Concatenating discovered audio files${C0}"
 
   if [[ ! -s ./ccab_concat.mp3 ]]; then
-    killWait 3 
     # Due to ffmpeg issues, must have concat list in same dir as concat files.
     # ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn -c copy ccab_concat.mp3
-    ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn ccab_concat.mp3
-    logIt "concatFiles" $LINENO "TRACE"  "ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn -c copy ccab_concat.mp3"
+    debugIt "ffmpeg -loglevel fatal -y -safe 0 -f concat -i ./ccab_concat.lst -vn -sn ccab_concat.mp3"
+    ffmpeg -loglevel quiet -y -stats -safe 0 -f concat -i ./ccab_concat.lst -vn -sn ccab_concat.mp3
     STATUS=$?
   else
-    killWait 0
     STATUS=0
   fi
 
   if (( STATUS > 0 )); then
-    logIt "concatFiles" $LINENO "ERROR!" "$STATUS: Errors detected during encoding."
-    echo -e "${C5}ERROR: $STATUS concatenating files."
+    echo -e "${C5}ERROR: ${C3}$STATUS${C0} concatenating files."
     return $STATUS
   elif (( remove == 1 )); then
-    logIt "concatFiles" $LINENO "OK  "  "Encode of concatenated file successful."
-    while read LINE; do
-      logIt "concatFiles" $LINENO "TRACE" "rm $(awk -F\' '{print $2}' <<< "$LINE")"
+    echo -e "${C1}   OK:${C0} Concatenated files encoded successfully."
+    while read -r LINE; do
+      debugIt "rm \"$(awk -F\' '{print $2}' <<< "$LINE")\""
       rm "$(awk -F\' '{print $2}' <<< "$LINE")" 
     done < ./ccab_concat.lst
   else
-    logIt "concatFiles" $LINENO "OK  "  "Encode of concatenated file successful."
+    echo -e "${C1}   OK:${C0} Concatenated files encoded successfully."
   fi
+
+  debugIt "bookDuration=\$(ffprobe ./ccab_concat.mp3 2>&1 |grep 'Duration' | awk -F',' '{print \$1}' | awk '{print \$2}')"
   bookDuration=$(ffprobe ./ccab_concat.mp3 2>&1 |grep 'Duration' | awk -F',' '{print $1}' | awk '{print $2}')
-  logIt "concatFiles" $LINENO "info"  "Concatenated bookDuration = $bookDuration"
+  echo -e " INFO: Concatenated bookDuration = ${C3}$bookDuration${C0}"
 
-  rm -f ./ccab_concat.lst
+  debugIt "rm -f ./ccab_concat.lst"
+  ## rm -f ./ccab_concat.lst
   
-  # set +x
-
   return 0
 }
 
-tagIt ()
+tagIt()
 {
   in=$1
-  displayIt "Applying ID3 tags to:" "$in"
-  logIt "tagIt" $LINENO "info "  "in = $in"
+  echo -e "Applying ID3 tags to: $in"
+
   # Set tags to discovered tags
   author=$bookAuthor
-  logIt "tagIt" $LINENO "info "  "author = $author"
+  logIt "[tagIt.$LINENO] author = ${C3}$author${C0}"
   title=$bookTitle
-  logIt "tagIt" $LINENO "info "  "title = $title"
+  logIt "[tagIt.$LINENO] title = ${C3}$title${C0}"
   series=$bookSeries
-  logIt "tagIt" $LINENO "info "  "series = $series"
-  logIt "tagIt" $LINENO "info "  "bookCover = $bookCover"
+  logIt "[tagIt.$LINENO] series = ${C3}$series${C0}"
+
   if [[ -z $author || -z $title ]]; then
-    killWait 1 "No tag information to apply, bailing."
+    echo -e "${C5}ERROR:${C0} No tag information to apply, bailing."
     return 1
   fi
 
   # Attempted to use several command line tag editors, mid3v2 does most of what I needed, but has some 
   # issues with cover art....
 
-  mid3v2 --delete-all "$in" >/dev/null 2>>$ccLog
+  debugIt "mid3v2 --delete-all \"$in\""
+  mid3v2 --delete-all "$in" >/dev/null 2>&1
 
   # Add book cover image and tags or...
   if [[ -s "$bookCover" ]]; then
     # Failing back to fancy_audio for cover art :/.
-    logIt "tagIt" $LINENO "TRACE"  "fancy_audio \"$in\" \"$bookCover\""
-    fancy_audio "$in" "$bookCover" 1>>$ccError 2>&1
+    debugIt "fancy_audio \"$in\" \"$bookCover\""
+    fancy_audio "$in" "$bookCover"
 
-    logIt "tagIt" $LINENO "TRACE"  "mid3v2 -a \"$author\" -A \"$series\" -t \"$title\" -g \"audiobook\" -T 1 -c \"Comment\":\"$goodreadsURL\":\"eng\" -c \"Rating\":\"$bookRating\":\"eng\" -c \"Encoded by\":\"theGh0st\":\"eng\" \"$in\""
+    debugIt "mid3v2 -a \"$author\" -A \"$series\" -t \"$title\" -g \"audiobook\" -T 1 -c \"Comment\":\"$goodreadsURL\":\"eng\" \
+      -c \"Rating\":\"$bookRating\":\"eng\" -c \"Encoded by\":\"theGh0st\":\"eng\" \"$in\""
     #  shellcheck disable=2140
-    mid3v2 -a "$author" -A "$series" -t "$title" -g "audiobook" -T 1 -c "Comment":"$goodreadsURL":"eng" -c "Rating":"$bookRating":"eng" -c "Encoded by":"theGh0st":"eng" "$in" >/dev/null 2>>$ccError
+    mid3v2 -a "$author" -A "$series" -t "$title" -g "audiobook" -T 1 -c "Comment":"$goodreadsURL":"eng" -c "Rating":"$bookRating":"eng" -c "Encoded by":"theGh0st":"eng" "$in" >/dev/null
     STATUS=$?
 
     if (( STATUS > 0 )); then
-      logIt "tagIt" $LINENO "ERROR!" "$STATUS: Failed to tag $in"
-      killWait 1 "Error adding tags to $in."
+      echo -e "${C5}ERROR${C0}:$STATUS Failed to tag ${C3}$in${C0}"
       return $STATUS
     else
-      logIt "tagIt" $LINENO "OK  "  "Tagging of $in successfull."
-      killWait 0
+      echo -e "${C1}   OK:${C0} Tagging of ${C3}$in${C0} successfull."
       return 0
     fi
+
   else
+
     # ... Only add IDv3 tags without book cover.
-    logIt "tagIt" $LINENO "TRACE"  "mid3v2 -a \"$author\" -A \"$series\" -t \"$title\" -g \"audiobook\" -T 1 -c \"Comment\":\"$goodreadsURL\":\"eng\" -c \"Rating\":\"$bookRating\":\"eng\" -c \"Encoded by\":\"theGh0st\":\"eng\" \"$in\""
+    debugIt "mid3v2 -a \"$author\" -A \"$series\" -t \"$title\" -g \"audiobook\" -T 1 -c \"Comment\":\"$goodreadsURL\":\"eng\" \
+      -c \"Rating\":\"$bookRating\":\"eng\" -c \"Encoded by\":\"theGh0st\":\"eng\" \"$in\""
+
     #  shellcheck disable=2140
-    mid3v2 -a "$author" -A "$series" -t "$title" -g "audiobook" -T 1 -c "Comment":"$goodreadsURL":"eng" -c "Rating":"$bookRating":"eng" -c "Encoded by":"theGh0st":"eng" "$in" >/dev/null 2>>$ccError
+    mid3v2 -a "$author" -A "$series" -t "$title" -g "audiobook" -T 1 -c "Comment":"$goodreadsURL":"eng" -c "Rating":"$bookRating":"eng" -c "Encoded by":"theGh0st":"eng" "$in" >/dev/null
     STATUS=$?
+
     if (( STATUS > 0 )); then
-      logIt "tagIt" $LINENO "ERROR!" "$STATUS: Failed to tag $in"
-      killWait 1 "Error adding tags to $in."
+      echo -e "${C5}ERROR:${C0}$STATUS Failed to tag ${C3}$in${C0}"
       return $STATUS
     else
-      logIt "tagIt" $LINENO "OK  "  "Tagging of $in successfull."
-      killWait 0
+      echo -e "${C1}   OK:${C0} Tagging of ${C3}$in${C0} successful."
       return 0
     fi
   fi
 }
 
-convert ()
+convert()
 {
   in=$1
   out="$(sed 's/....$//' <<< "$in").mp3"
   outFile[$j]=$out
-  displayIt "Converting $in to mp3 format"
-  logIt "convert" $LINENO "info "  "in = $in"
-  logIt "convert" $LINENO "info "  "out = $out"
+  logIt "[convert.$LINENO] Converting ${C3}$(basename "$in")${C0} to mp3."
+
   if [[ ! -s $out ]]; then
-    logIt "convert" $LINENO "TRACE" "ffmpeg ${ffOptions} -i \"$in\" -vn -sn -map_metadata -1 \"$out\""
-    ffmpeg -loglevel error -i "${in}" -vn -sn -map_metadata -1 "${out}" 
+    debugIt "ffmpeg -loglevel error -i \"${in}\" -vn -sn -map_metadata -1 \"${out}\""
+    echo "      ${C3}book duration: $bookDuration (may not be accurate)${C0}"
+    ffmpeg -hide_banner -loglevel error -stats -i "${in}" -vn -sn -map_metadata -1 "${out}" 
     STATUS=$?
   else
-    logIt "convert" $LINENO "WARN" "$out already exist."
+    echo -e "${C4}WARNING: ${C3}$out${C0} already exist."
     STATUS=0
   fi
+
   # echo -e "${C0}"
   if (( STATUS > 0 )); then
-    logIt "convert" $LINENO "ERROR!" "$STATUS: Failed to convert $in."
-    killWait 1 "Failed to convert file to mp3 format."
+    echo -e "${C5}ERROR:${C0}$STATUS: Failed to convert ${C3}$in${C0}."
     return 1
   else
-    logIt "convert" $LINENO "OK" "File $in converted."
-    echo "$(date +%Y.%m.%d' @ '%H:%M.%S) $in" > /dev/null 2>&1
+    echo -e "${C1}   OK:${C0} File ${C3}$in${C0} converted."
 
     # Set flag for m4b/m4a conversion success.
     m4bFile=1
@@ -686,85 +684,61 @@ convert ()
     # Add converted file to concat list if option set.
     if (( concat == 1 )); then
       echo "file '$out'" >> "$fileList"
-      rm ccab_concat.mp3 > /dev/null 2>&1
+      ## rm ccab_concat.mp3 > /dev/null 2>&1
     fi
-    killWait 0
     return 0
   fi
 }
 
-displayInfo ()
+displayInfo()
 {
-  # prompt=$1
+  #prompt=$1
   if [[ -z $bookAuthor || -z $bookTitle ]]; then
     logIt "displayInfo" $LINENO "ERROR!" "No information to display."
-    echo -e "${C5}Nothing to display."
+    echo -e "${C5}Nothing to display.${C0}"
     return 1
   fi
-  logIt "displayInfo" $LINENO "TRACE" "bookAuthor=$bookAuthor; bookTitle=$bookTitle"
+  debugIt "[displayInfo.$LINENO] bookAuthor=${C3}$bookAuthor${C0}; bookTitle=${C3}$bookTitle${C0}"
 
   cat << EOT
 
-    ${C4}Author:  ${C6}$bookAuthor${C0}
-    ${C4}Reverse: ${C6}$bookAuthorReverse${C0}
-    ${C4}Title:   ${C6}$bookTitle${C0}
-    ${C4}Series:  ${C6}$bookSeries${C0}
-    ${C4}Rating:  ${C6}$bookRating${C0}
-    ${C4}Year:    ${C6}$bookYear${C0}
-    ${C4}Stream:   ${C6}$audioStream${C0}
-    ${C4}Bitrate:  ${C6}$bookBitrate${C0}
-    ${C4}Sample:   ${C6}$bookSample${C0}
-    ${C4}Duration: ${C6}$bookDuration${C0}
-    ${C4}Size:     ${C6}$bookSize${C0}
-    ${C4}URL:      ${C6}$goodreadsURL${C0}
+    Author:   ${C3}$bookAuthor${C0}
+    Reverse:  ${C3}$bookAuthorReverse${C0}
+    Title:    ${C3}$bookTitle${C0}
+    Series:   ${C3}$bookSeries${C0}
+    Rating:   ${C3}$bookRating${C0}
+    Year:     ${C3}$bookYear${C0}
+    Bitrate:  ${C3}$bookBitrate${C0}
+    Duration: ${C3}$bookDuration${C0}
+    URL:      ${C3}$goodreadsURL${C0}
 EOT
 
   if [[ -s $bookGenre ]]; then
-    echo -e "  ${C4}Classifications:${C0}"
-    while read LINE; do
-      echo -e "    ${C6}$(sed -r 's/^[0-9]{2} / &/; s/^[0-9] /  &/' <<< "$LINE" )${C0}"
+    echo -e "\n  Classifications:"
+    while read -r LINE; do
+      echo -e "    ${C3}$(sed -r 's/^[0-9]{2} / &/; s/^[0-9] /  &/' <<< "$LINE" )${C0}"
     done < "$bookGenre"
   echo ""
   fi
 
-  if [[ -n $prompt ]]; then
-    unset prompt
-    echo -e "${C3}Do you want to change values?${C0} [n]\b\b\c"
-    read ANS
-    # shellcheck disable=2034
-    tmpANS=n
-    ANS=$(echo "$ANS" | tr '[:upper:]' '[:lower:]')
-    ANS=${ANS:-tmpANS}
-
-    if [[ $ANS = 'y' ]]; then
-      return 1
-    else
-      return 0
-    fi
-  else
-    return 0
-  fi
 }
 
-getInfo ()
+getInfo()
 {
-  bookGenre=$logDir/bookGenre.txt
-  # Collect book summary information
-  displayIt "Collecting book information from goodreads.com"
+  bookGenre="$workDir/goodreads.genre"
+  bookInfo="${baseName}.info"
+  logIt "[getInfo.$LINENO] Collecting book information from goodreads.com"
   if [[ ! -s $lookupInfo ]]; then
-    logIt "getInfo" $LINENO "ERROR!" "No $lookupInfo file to search, bailing."
-    killWait 1 "No $lookupInfo file to search."
+    echo -e "${C5}ERROR:${C0} No ${C3}$lookupInfo${C0} file to search, bailing."
     return 1
   fi
 
-  logIt "getInfo" $LINENO "info" "Collecting book information."
   origIFS="$IFS"
   IFS=$'\n'
-  grep -E 'people shelved this book' "$lookupInfo" | sed 's/&#39;//g' |awk -F'"' '{print $2}' | head -5 > $bookGenre
+  grep -E 'people shelved this book' "$lookupInfo" | sed 's/&#39;//g' |awk -F'"' '{print $2}' | head -5 > "$bookGenre"
   IFS="$origIFS"
 
-  rm -rf "${baseName}.info" >/dev/null 2>&1
-  cat <<EO_Info > "${baseName}.info"
+  cat <<EO_Info > "$bookInfo"
 Author:    $bookAuthor
 Title:     $bookTitle
 Series:    $bookSeries
@@ -774,44 +748,43 @@ URL:       $goodreadsURL
 
 Classifications:
 EO_Info
-  while read LINE; do
-    echo "  $(sed -r 's/^[0-9]{3} / &/; s/^[0-9]{2} /  &/; s/^[0-9] /   &/' <<< "$LINE")" >> "${baseName}.info"
-  done < $bookGenre
-  echo -e "\nSummary:" >> "${baseName}.info" 2>>$ccError
+
+  while read -r LINE; do
+    echo "  $(sed -r 's/^[0-9]{3} / &/; s/^[0-9]{2} /  &/; s/^[0-9] /   &/' <<< "$LINE")" >> "$bookInfo"
+  done < "$bookGenre"
+  echo -e "\nSummary:" >> "$bookInfo"
 
   # Attempt to get the full book summary information.
+  debugIt "bookID=\$(grep -m 1 -E '^.*freeTextContainer.*>' \"$lookupInfo\" | awk -F'[\"\"]' '{print \$2}' | sed 's/Container//')"
   bookID=$(grep -m 1 -E '^.*freeTextContainer.*>' "$lookupInfo" | awk -F'[""]' '{print $2}' | sed 's/Container//')
   if (( $(grep -c "$bookID" "$lookupInfo") == 0 )); then
     bookID=$(sed 's/freeText/freeTextContainer/' <<< "$bookID")
   fi
-  # grep $bookID $lookupInfo | sed "s/<br>/\n/g; s/<[^>]*>//g; s/\xE2\x80\x99/\'/g; s/\xE2\x80\x94/\-/g" | fold -w 80 -s >> "${baseName}.info"
-  logIt "getInfo" $LINENO "info" "bookID = $bookID"
-  grep "$bookID" "$lookupInfo" | sed "s/<br>/\n/g; s/<[^>]*>//g; s/\xE2\x80//g; s/\x99/'/g; s/\x94/\-/g" | fold -w 80 -s >> "${baseName}.info"
-  logIt "getInfo" $LINENO "TRACE" "grep $bookID $lookupInfo | sed \"s/<br>/\\\n/g; s/<[^>]*>//g; s/\xE2\x80//g; s/\x99/'/g; s/\x94/\-/g\" | fold -w 80 -s >> \"${baseName}.info\""
-  sed -i 's/\xE2\x80\x9C/"/g; s/\xE2\x80\x9D/"/g; s/\xC3\x82//g; s/\xC5\x93/"/g; s/\xC2\x9D/"/g' "${baseName}.info"
-  logIt "getInfo" $LINENO "TRACE" "sed -i 's/\xE2\x80\x9C/\"/g; s/\xE2\x80\x9D/\"/g; s/\xC3\x82//g' \"${baseName}.info\""
+
+  grep "$bookID" "$lookupInfo" | sed "s/<br>/\n/g; s/<[^>]*>//g; s/\xE2\x80//g; s/\x99/'/g; s/\x94/\-/g" | fold -w 80 -s >> "$bookInfo"
+  sed -i 's/\xE2\x80\x9C/"/g; s/\xE2\x80\x9D/"/g; s/\xC3\x82//g; s/\xC5\x93/"/g; s/\xC2\x9D/"/g' "$bookInfo"
   
   # Replace extended characters with apostrophe
   # echo "X" | od -t x1c  # Display hex codes
   
   # Download book cover image
   if [[ ! -s "${bookCover}" ]]; then
-    logIt "getInfo" $LINENO "TRACE" "curl -s -o \"$bookCover\" $imageSource" 
-    curl -s -o "$bookCover" "$imageSource" 1>>$ccError 2>&1
+    debugIt "curl -s -o \"$bookCover\" \"$imageSource\""
+    curl -s -o "$bookCover" "$imageSource" 
     STATUS=$?
 
     if (( STATUS > 0 )); then
-      logIt "getInfo" $LINENO "ERROR!" "Unable to download book cover image."
+      echo -e "${C5}ERROR:${C0} Unable to download book cover image."
     else
-      logIt "getInfo" $LINENO "OK" "Downloaded book cover image."
+      echo -e "${C1}   OK:${C0} Downloaded book cover image."
     fi
   else
-    logIt "getInfo" $LINENO "info" "Using existing cover art ${bookCover}"
+    echo -e "${C4} INFO:${C0} Using existing cover art ${C3}${bookCover}${C0}"
   fi
 
   # Create shortcut to goodreads url
   urlName="${baseName}.goodreads.url"
-  logIt "getInfo" $LINENO "info" "URL = $goodreadsURL"
+  logIt "[getInfo.$LINENO] URL file = ${C3}$urlName${C0}"
 
   cat <<EO_URL >"$urlName"
 [{000214A0-0000-0000-C000-000000000046}]
@@ -821,203 +794,232 @@ IDList=
 URL=$goodreadsURL
 EO_URL
 
-  killWait 0
   return 0
 }
 
-lookupMP3 ()
+lookupMP3()
 {
-  # in="$1"
-  lookupResults=$logDir/goodreadsResults.lst
-  lookupInfo=$logDir/lookupInfo.html
+  # Function to lookup book on goodreads.com
+
+  #set -e
+
+  inFile="$1"
+  lookupResults="$workDir/goodreads.results"
+  lookupInfo="$workDir/goodreads.normalized"
+  htmlInfo="$workDir/goodreads.html"
+
   searchString="$bookTitle $bookAuthor"
     # Various filters for book titles before search, ideally only book title and author.
     searchString=$(sed 's/([Uu]nabridged)//' <<< "$searchString")
-  displayIt "Looking up:" "$searchString"
-
-  logIt "lookupMP3" $LINENO "TRACE" "googler -n 5 --np -C -w goodreads.com \"$searchString\""
-  scl enable rh-python35 -- googler -n 5 --np -C -w goodreads.com "$searchString" > $lookupResults 2>>$ccError
-
-  while [[ ! -s $lookupResults ]]; do
-    killWait 1 "No results found using $searchString"
-    echo -e "\n${C3}Enter new book title [${C4}$bookTitle${C0}]: ${C4}\c"
-    read tmpBookTitle
-    bookTitle=${tmpBookTitle:-$bookTitle}
-    echo -e "${C3}Enter new book author [${C4}$bookAuthor${C0}]: ${C4}\c"
-    read tmpBookAuthor
-    bookAuthor=${tmpBookAuthor:-$bookAuthor}
-    searchString="$bookTitle $bookAuthor"
-
-    displayIt "Looking up:" "$searchString"
-    echo -e "${C3}Searching for $searchString.${C0}"
-    scl enable rh-python35 -- googler -n 5 -C --np -w goodreads.com "$searchString" > $lookupResults
-    STATUS=$?
+  debugIt "googler -n 5 --np -C -w www.goodreads.com $searchString > $lookupResults"
+  googler -n 5 --np -w www.goodreads.com "$searchString" > "$lookupResults"
+  #googler -n 5 --np -C -w goodreads.com "$searchString" > "$lookupResults"
+  
+  while [[ ! -s "$lookupResults" ]]; do
+    echo -e "${C4} WARN:${C0} No results found using $searchString\n"
+    echo -e "${C3} Enter direct URL: \c"
+    read -r goodreadsURL
+    echo "$goodreadsURL" > "$lookupResults"
+#    echo -e "  ${C3}Enter new book title [${C4}$bookTitle${C0}]: ${C4}\c"
+#    read tmpBookTitle
+#    bookTitle=${tmpBookTitle:-$bookTitle}
+#    echo -e "  ${C3}Enter new book author [${C4}$bookAuthor${C0}]: ${C4}\c"
+#    read tmpBookAuthor
+#    bookAuthor=${tmpBookAuthor:-$bookAuthor}
+#    searchString="$bookTitle $bookAuthor"
+#
+#    echo -e "Looking up: ${C3}$searchString${C0}"
+#    googler -n 5 --np -w https://www.goodreads.com "$searchString" > "$lookupResults"
+#    #googler -n 5 -C --np -w goodreads.com "$searchString" > "$lookupResults"
+#    STATUS=$?
   done
-  killWait 0
 
-  goodreadsURL=$(grep -E '(http|https):.*book' $lookupResults | head -n 1)
+  ## # Grab first result from results (Need to fix color issue)
+  ## goodreadsURL=$(grep -E '(http|https):.*book' "$lookupResults" | head -n 1)
+
   if [[ -z $goodreadsURL || $verify -eq 1 ]]; then
-    echo -e "${C0}"
-    cat $lookupResults
-    echo -e "${C4}Pick the number of the link results to use for info ('6' for new search, '7' direct URL): \c${C0}"
-    read result 
+    echo -e "  ${C7}Current directory: ${C3}$PWD${C0}"
+    echo -e "  ${C7}Current file: ${C3}$(basename "$inFile")${C0}\n"
+    sed 's/ - Goodreads//' "$lookupResults"
+    echo -e "${C6}Pick the number of the link results to use for info ('6' for new search, '7' direct URL):${C0} \c"
+    read -r result 
+
+    ## BAD RESULT
     while [[ $result -lt 1 || $result -gt 5 ]]; do
       if [[ $result -eq 6 ]]; then
-        echo -e "${C3}Enter new search string: ${C0}\c"
-        read searchString
-        scl enable rh-python35 -- googler -n 5 --np -C -w goodreads.com "$searchString" > $lookupResults 2>/dev/null
-        cat $lookupResults
+        echo -e "${C4}Enter new search string: ${C0}\c"
+        read -r searchString
+        googler -n 5 --np -w https://www.goodreads.com "$searchString" > "$lookupResults" 2>/dev/null
+        cat "$lookupResults"
         result=0
       elif [[ $result -eq 7 ]]; then
-        echo -e "${C3}Enter book URL manually: ${C0}\c"
-        read goodreadsURL
+        echo -e "${C4}Enter book URL manually: ${C0}\c"
+        read -r goodreadsURL
         break
       else
-        echo -e "${C4}Pick the number of the link results to use for info ('6' for new search): \c${C0}"
-        read result
+        echo -e "${C6}Pick the number of the link results to use for info ('6' for new search, '7' direct URL):${C0} \c"
+        read -r result
       fi
     done
+
+    ## OKAY RESULT
     if [[ $result -gt 0 && $result -lt 6 ]]; then
-      goodreadsURL=$(grep -A 1 "^ $result" $lookupResults | tail -1)
+      debugIt "goodreadURL=\$(grep -m 1 -A 1 \"^ $result\" \"$lookupResults\" | awk '{ print \$1 }')"
+      # Strip ASCII color codes from output (could use -C on googler, but like colors)
+      sed -i -r "s/\x1B\[([0-9]{1,2}(;[0-9]{1,2})?)?[m|K]//g" "$lookupResults"
+      goodreadsURL=$(grep -A 1 "^ ${result}." "$lookupResults" | tail -1 | awk '{ print $1 }')
     fi
+
   fi
-  logIt "lookupMP3" $LINENO "info" "goodreadsURL = $goodreadsURL"
+
+  logIt "[lookupMP3.$LINENO] goodreadsURL = ${C3}$goodreadsURL${C0}"
 
   if [[ -n $goodreadsURL ]]; then
-    rm $lookupInfo 2>/dev/null
-    logIt "lookupMP3" $LINENO "TRACE" "curl -s $goodreadsURL -o $lookupInfo"
-    curl -sL "$goodreadsURL" -o "$lookupInfo" 1>>"$ccError" 2>&1
-    STATUS=$?
+    debugIt "curl -sL $goodreadsURL -o \"$htmlInfo\""
+    #shellcheck disable=SC2086
+    curl -sL $goodreadsURL -o "$htmlInfo"
+    hxnormalize -l 9999 -x "$htmlInfo" > "$lookupInfo"
 
-    if (( STATUS > 0 )); then
-      logIt "lookupMP3" $LINENO "ERROR!" "$STATUS: Unable to obtain goodreads.com URL"
-      return $STATUS
+    if [[ ! -s "$lookupInfo" ]]; then
+      echo -e "${C5}ERROR:${C0}$STATUS [$LINENO] Unable to obtain page data from URL"
+      return 1
     else
-      logIt "lookupMP3" $LINENO "OK" "Obtained goodreads.com URL for book."
+      echo -e "${C1}   OK:${C0} Obtained goodreads.com URL for book"
     fi
 
-    logIt "lookupMP3" $LINENO "TRACE" "bookSeries = grep -A 1 -E 'class=\\\"greyText.*\/series\/' $lookupInfo | tail -1 | sed 's/(Publication) //' | awk -F '[()]' '{print \$2}' | tr -d '#'"
-    bookSeries=$(grep -A 1 -E 'class=\"greyText.*\/series\/' $lookupInfo | tail -1 | sed 's/(Publication) //' | sed 's/(Part .)//; s/\&amp;/\&/g' | awk -F '[()]' '{print $2}' | tr '#' '0' | tr '/' '-' | tr ':' ',')
-    if [[ -z $bookSeries ]]; then
-      # try 2nd approach
-      logIt "lookupMP3" $LINENO "TRACE" "bookSeries=$(grep -A 1 -E '<h1 id=\"bookTitle\" class=\"bookTitle\"' $lookupInfo | tail -1 | awk -F'[()]' '{print $2}' | sed 's/\&amp;/\&/' | tr '/' '-' | tr ':' ',')"
-      bookSeries=$(grep -A 1 -E '<h1 id="bookTitle" class="bookTitle"' $lookupInfo | tail -1 | awk -F'[()]' '{print $2}' | sed 's/\&amp;/\&/' | tr '/' '-' | tr ':' ',')
-    fi
+    debugIt "fullTitle=\$(grep \"property='og:title'\" \"$lookupInfo\")"
+    title1=$(hxselect -ic title < "$lookupInfo" | awk -F' by ' '{ print $1 }')
+    title2=$(grep 'property=.og:title.' "$lookupInfo" |awk -F"['']" '{ print $2 }')
+    fullTitle=${title1:-$title2}
+
+    ## Normalize title
+    fullTitle=$(sed 's/\&amp;/\&/' <<< "$fullTitle" | tr '#' '0' | tr -d ',' | tr ':' ',' | tr '/' '-')
+
+    logIt "[lookupMP3.$LINENO] fullTitle = ${C3}$fullTitle${C0}"
+   
+    debugIt "author=\$(hxselect -ic title <\"$lookupInfo\" | awk -F' by ' '{ print $2 }')"
+    author=$(hxselect -ic title < "$lookupInfo" | awk -F' by ' '{ print $2 }')
+    bookAuthor=${author:-$bookAuthor}
+    
+    # Fix accented names
+    bookAuthor=${bookAuthor/É/E}
+    logIt "[lookupMP3.$LINENO] bookAuthor = ${C3}$bookAuthor${C0}"
+    
+    debugIt "bookAuthorReverse=\$(awk '{$1=$NF\", \"$1;NF--} 1' <<< \"$bookAuthor\" | sed 's/\.$//')"
+    bookAuthorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$bookAuthor" | sed 's/\.$//')
+    logIt "[lookupMP3.$LINENO] bookAuthorReverse = ${C3}$bookAuthorReverse${C0}"
+   
+    debugIt "bookSeries=\$(hxselect -ic h2 < \"$lookupInfo\" | awk -F'[()]' '{ print $2 }')"
+    bookSeries=$(hxselect -ic h2 <"$lookupInfo" | awk -F'[()]' '{ print $2 }')
+    ## Normalize series
+    bookSeries=$(sed 's/\&amp;/\&/' <<< "$bookSeries" | tr '#' '0' | tr -d ',' | tr ':' ',' | tr '/' '-')
+    logIt "[lookupMP3.$LINENO] bookSeries = ${C3}$bookSeries${C0}"
+    
+    debugIt "bookTitle=\$(awk -F'(' '{print $1}' <<< \"$fullTitle\" | sed 's/ $//')"
+    bookTitle=$(awk -F'(' '{print $1}' <<< "$fullTitle" | sed 's/ $//')
+    logIt "[lookupMP3.$LINENO] bookTitle = ${C3}$bookTitle${C0}"
 
     # A whole lot of manipulation to get padded series numbers and or .x versions
-    bookSeriesNum=$(awk '{print $NF}' <<< "$bookSeries" | sed 's/^0//')
+    debugIt "bookSeriesNum=\$(awk '{print $NF}' <<< \"$bookSeries\" | sed 's/^0//' | tr -d ')')"
+    bookSeriesNum=$(awk '{print $NF}' <<< "$bookSeries" | sed 's/^0//' | tr '/' '-' | tr -d ')')
+
     majorNum=$(awk -F'.' '{printf "%.2d", "$1"}' <<< "$bookSeriesNum")
     if [[ $majorNum = "00" ]]; then
       majorNum=$(printf "%.2d" "$bookSeriesNum" 2>/dev/null) 
     fi
-    logIt "lookupMP3" $LINENO "info" "majorNum = $majorNum"
+    logIt "[lookupMP3.$LINENO] majorNum = ${C3}$majorNum${C0}"
+
     minorNum=$(awk -F'.' '{print $2}' <<< "$bookSeriesNum")
+    logIt "[lookupMP3.$LINENO] minorNum = ${C3}$minorNum${C0}"
+
     if [[ -n $minorNum ]]; then
       bookSeriesNum="${majorNum}.${minorNum}"
-      logIt "lookupMP3" $LINENO "info" "minorNum = $minorNum"
     else
       bookSeriesNum="${majorNum}"
     fi
-    logIt "lookupMP3" $LINENO "info" "bookSeriesNum = $bookSeriesNum"
+    logIt "[lookupMP3.$LINENO] bookSeriesNum = ${C3}$bookSeriesNum${C0}"
+
+    debugIt "bookSeries=\"\$(awk 'NF{NF--};1' <<< \"$bookSeries\") $bookSeriesNum\""
     bookSeries="$(awk 'NF{NF--};1' <<< "$bookSeries") $bookSeriesNum"
+    logIt "[lookupMP3.$LINENO] bookSeries = ${C3}$bookSeries${C0}"
 
     # Still testing this  
-    bookYear=$(grep '^\s*(first published' $lookupInfo | awk -F'[()]' '{print $2}' | sed -r 's/.*([0-9]{4})/\1/')
-    if [[ -z $bookYear ]]; then
-      bookYear=$(grep -A1 '^\s*Published' $lookupInfo | tail -1 | sed -r 's/.*([0-9]{4})/\1/')
-    fi
-    logIt "lookupMP3" $LINENO "info" "bookYear = $bookYear"
+    debugIt "bookYear=\$(grep -m 1 'Published' \"$lookupInfo\" | sed -rn 's/.*([0-9]{4}).*/\1/p')"
+    bookYear=$(grep -m 1 'Published' "$lookupInfo" | sed -rn 's/.*([0-9]{4}).*/\1/p')
+    logIt "[lookupMP3.$LINENO] bookYear = ${C3}$bookYear${C0}"
 
     # Set year if not a series
     if [[ $bookSeries == ' 00' ]]; then
       # bookSeries="00"
       bookSeries=$bookYear
+      logIt "[lookupMP3.$LINENO] bookSeries = ${C3}$bookSeries${C0}"
     fi
-    logIt "lookupMP3" $LINENO "info" "bookSeries = $bookSeries"
-
-    # Get book title from goodreads info.
-    logIt "lookupMP3" $LINENO "TRACE" "bookTitle = grep -A 1 'id=\"bookTitle\" class=\"bookTitle\" itemprop=\"name\"' $lookupInfo |tail -1 | sed 's/^[[:space:]]*//' | awk -F'[()]' '{print $1}' | sed 's/\&amp;/\&/g; s/ $//; s/\//-/g; s/\\/-/g' | tr ':' '-' | tr -d '?')"
-    bookTitle=$(grep -A 1 'id="bookTitle" class="bookTitle" itemprop="name"' $lookupInfo |tail -1 | sed 's/^[[:space:]]*//' | awk -F'[()]' '{print $1}' | sed 's/\&amp;/\&/g; s/ $//; s/\//-/g; s/\\/-/g' | tr ':' '-' | tr -d '?')
-    logIt "lookupMP3" $LINENO "info" "bookTitle = $bookTitle"
-
-    # Get book author from goodreads info.
-    logIt "lookupMP3" $LINENO "TRACE" "bookAuthor = grep 'class=\"authorName\" itemprop=\"url\"' $lookupInfo | awk -F'>' '{print $3}' | sed 's/<.*$//; s/  / /g' | head -1)"
-    bookAuthor=$(grep 'class="authorName" itemprop="url"' $lookupInfo | awk -F'>' '{print $3}' | sed 's/<.*$//; s/  / /g' | head -1)
-    logIt "lookupMP3" $LINENO "info" "bookAuthor = $bookAuthor"
-    bookAuthorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$bookAuthor" | sed 's/\.$//')
-    logIt "lookupMP3" $LINENO "info" "bookAuthorReverse = $bookAuthorReverse"
 
     # Get book rating from goodreads info.
-    bookRating=$(grep 'ratingValue' $lookupInfo | sed 's/.*<.*ratingValue">//; s/<\/.*>//')
-    logIt "lookupMP3" $LINENO "info" "bookRating = $bookRating"
+    debugIt "bookRating=\$(grep 'ratingValue' \"$lookupInfo\" | sed -rn 's/.*([0-9]\.[0-9]{2}).*/\1/p')"
+    #bookRating=$(grep 'ratingValue' "$lookupInfo" | sed 's/.*<.*ratingValue">//; s/<\/.*>//')
+    bookRating=$(grep 'ratingValue' "$lookupInfo" | sed -rn 's/.*([0-9]\.[0-9]{2}).*/\1/p')
+    logIt "[lookupMP3.$LINENO] bookRating = ${C3}$bookRating${C0}"
 
     # Get book cover from goodreads info.
-    imageSource=$(grep -m 1 'Audible' $lookupInfo |sed 's/\\n/\n/g' |grep 'img src' | awk -F'"' '{print $2}' | tr -d '\\')
-    if [[ -z ${imageSource} ]]; then
-      imageSource=$(grep -m 1 '\"coverImage\"' $lookupInfo |sed 's/ /\n/g' |grep 'src' |awk -F'"' '{print $2}')
-      logIt "lookupMP3" $LINENO "info" "Using default image source"
-    else
-      logIt "lookupMP3" $LINENO "info" "Using Audible image source"
-    fi
-    logIt "lookupMP3" $LINENO "info" "imageSource = $imageSource"
+    debugIt "imageSource=\$(grep 'og:image' \"$lookupInfo\" | awk -F'[\"\"]' '{ print $2 }')"
+    image1=$(grep 'og:image' "$lookupInfo" | awk -F'[""]' '{ print $2 }')
+    image2=$(grep -i -m 1 'coverimage' "$lookupInfo" | awk -F'src=' '{ print $2 }' | awk -F'[""]' '{ print $2 }')
+    imageSource=${image1:-$image2}
+    logIt "[lookupMP3.$LINENO] imageSource = ${C3}$imageSource${C0}"
 
     # Set new baseName based on goodreads info.
     baseName="${bookAuthor} - ${bookSeries} - ${bookTitle}"
-    logIt "lookupMP3" $LINENO "info" "baseName = $baseName"
+    logIt "[lookupMP3.$LINENO] baseName = ${C3}$baseName${C0}"
 
     bookCover="${baseName}.cover.jpg"
-    logIt "lookupMP3" $LINENO "info" "bookCover = $bookCover"
+    logIt "[lookupMP3.$LINENO] bookCover = ${C3}$(basename "$bookCover")${C0}"
+    
   fi
+
   return 0
 }
 
-reEncode ()
+reEncode()
 {
   in=$1
-  logIt "reEncode" $LINENO "info" "in = $in"
 
-  displayIt "Encoding:" "$in"
+  logIt "[reEncode.$LINENO] Encoding: ${C3}$in${C0}"
   # Reset name of output file (append bitrate info).
   baseName="${bookAuthor} - ${bookSeries} - ${bookTitle}"
-  logIt "reEncode" $LINENO "info" "baseName = $baseName"
+  logIt "[reEncode.$LINENO] baseName = ${C3}$baseName${C0}"
 
   # Multiple in files may be passed to reEncode, array maintains out file.
   outFile[$j]="${baseName}.abr${bookBitrate}.mp3"
-  logIt "reEncode" $LINENO "info" "outFile[$j] = ${outFile[$j]}"
+  logIt "[reEncode.$LINENO] outFile[$j] = ${C3}${outFile[$j]}${C0}"
 
   # Check converted.log for already converted.
-  if [[ $(grep -c "${outFile[$j]}" "$convertLog") -gt 0 ]]; then
-    killWait 2 "$in already converted"
-    logIt "reEncode" $LINENO "WARN  " "${outFile[$j]} has already been converted."
-    # rm "$baseName"*
-    # exit 10
+  if grep -q "${outFile[$j]}" "$convertLog"; then
+    echo -e "${C4}WARNING: ${C3}${outFile[$j]}${C0} has already been converted."
+    #return 1
   fi
 
   # Re-encode input file with my parameters.
-  killWait 3 "Re-encoding $in"
-  echo -e "${C2}"
   if [[ ! -s ${outFile[$j]} ]]; then
-    logIt "reEncode" $LINENO "TRACE" "lame --nohist -m m --abr $bookBitrate --resample $bookSample \"$in\" \"${outFile[$j]}\""
-    lame --nohist -m m --abr $bookBitrate --resample "$bookSample" "$in" "${outFile[$j]}" 
+    #debugIt "lame --nohist -m m --abr $bookBitrate --resample \"$bookSample\" \"$in\" \"${outFile[$j]}\""
+    debugIt "lame --nohist -m m --abr $bookBitrate \"$in\" \"${outFile[$j]}\""
+    echo -e "${C2}"
+    lame --nohist -m m -V 6 "$in" "${outFile[$j]}" 
     STATUS=$?
     echo -e "${C0}"
   else
     # File previously encoded.
-    echo -e "  ${C4}${outFile[$j]} already encoded, skipping.${C0}"
-    logIt "reEncode" $LINENO "WARN" "$in already encoded."
+    echo -e "${C4}WARNING: ${C3}$in${C0} already encoded."
     STATUS=2
   fi
 
-  displayIt "Checking encoding status"
-  sleep 2
+  logIt "[reEncore.$LINENO] Checking encoding status"
   if (( STATUS == 1 )); then
-    logIt "reEncode" $LINENO "ERROR!" "$STATUS: Unknown error during lame encoding."
-    killWait 1 "Error during lame encode!"
+    echo -e "${C5}ERROR:${C3}$STATUS${C0} Unknown error during lame encoding."
     return $STATUS
   else
-    logIt "reEncode" $LINENO "OK" "lame encoding successful."
+    echo -e "${C1}   OK:${C0} lame encoding successful."
     echo "${outFile[$j]}" >> done.txt
-    killWait 0
     return 0
   fi
 }
@@ -1026,7 +1028,7 @@ moveIt ()
 {
   # set -x
   inFile="$1"
-  logIt "moveIt" $LINENO "info" "inFile = $inFile"
+  logIt "[moveIt.$LINENO] inFile = ${C3}$inFile${C0}"
 
   PS3_Orig=$PS3
   PS3="Select book type: "
@@ -1119,38 +1121,35 @@ moveIt ()
 
   baseDir=$(sed 's/\/$//' <<< $baseDir)
   outDir="$baseDir/$bookType/$bookAuthorReverse/$bookSeries - $bookTitle"
-  logIt "moveIt" $LINENO "info" "outDir = $outDir"
+  logIt "[moveIt.$LINENO] outDir = ${C3}$outDir${C0}"
 
   baseName="$bookAuthor - $bookSeries - $bookTitle"
-  logIt "moveIt" $LINENO "info" "baseName = $baseName"
+  logIt "[moveIt.$LINENO] baseName = ${C3}$baseName${C0}"
 
   if [[ -e "${outDir}/${baseName}\.abr[0-9][0-9]\.mp3" ]]; then
-    logIt "moveIt" $LINENO "WARN" "$outDir/${baseName}.abr??.mp3 already exists, skipping move"
-    killWait 1 "Output file already exist, skipping move."
+    echo -e "${C4}WARNING ${C3}$outDir/${baseName}.abr??.mp3${C0} already exists, skipping move"
     return 1
   fi
 
-  displayIt "Moving to:" "$outDir"
-  mkdir -p "$outDir" 1>>$ccError 2>&1
-  chown -R root:qnap "$baseDir/$bookType/$bookAuthorReverse"
+  logIt "[moveIt.$LINENO] Moving to: ${C3}$outDir${C0}"
+  mkdir -p "$outDir"
+  chown -R admin:qnap "$baseDir/$bookType/$bookAuthorReverse"
 
   if [[ ! -e "$inFile" ]]; then
-    killWait 1 "No '${baseName}*' files found to move."
-    logIt "moveIt" $LINENO "ERROR!" "Unable to find ${baseName}* files to move."
+    echo -e "${C5}ERROR:${C0} Unable to find ${C3}${baseName}*${C0} files to move."
     return 1
   fi
   
   if [[ -s "$outDir/$inFile" ]]; then
-    killWait 2 "Output file already exist, bailing"
-    logIt "moveIt" $LINENO "ERROR!" "Output files already exist"
+    echo -e "${C5}ERROR:${C0} Output files already exist"
     return 1
   fi
 
   IFS=$'\n'
   # shellcheck disable=2044
   for LINE in $(find . -name "${baseName}.*"); do
-    logIt "moveIt" $LINENO "TRACE" "mv \"$LINE\" \"$outDir/\""
-    mv "$LINE" "$outDir/" 1>>$ccError 2>&1
+    debugIt "mv \"$LINE\" \"$outDir/\""
+    mv "$LINE" "$outDir/"
   done
 
 #   while IFS= read -r -d '' LINE; do
@@ -1160,26 +1159,22 @@ moveIt ()
   STATUS=$?
 
   if (( STATUS > 0 )); then
-    logIt "moveIt" $LINENO "ERROR!" "$STATUS: Error attempting to move files."
-    killWait 1 "Unable to move files to $outDir"
+    echo -e "${C5}ERROR:${C3}$STATUS${C0} Error attempting to move files."
     return $STATUS
   else
-    chown -R root:qnap "$outDir"
+    chown -R admin:qnap "$outDir"
+    chmod 775 "$outDir"
     chmod 664 "$outDir"/*
-    logIt "moveIt" $LINENO "OK" "Move encoded files to $outDir"
-    rm $bookGenre $lookupInfo >/dev/null 2>&1
-    killWait 0
+    echo -e "${C1}   OK:${C0} Move encoded files to ${C3}$outDir${C0}"
     return 0
   fi
 }
 
-
 # -----------------------------------------------
 # MAIN
 # -----------------------------------------------
-logIt "MAIN" $LINENO "info" "options = $options"
-
-logIt "MAIN" $LINENO "FUNC" "calling getFiles: "
+echo -e " MAIN: $0 options = ${C3}$options${C0}"
+echo -e " MAIN: calling ${C6}getFiles()${C0}"
 getFiles
 j=0
 
@@ -1189,139 +1184,129 @@ j=0
 if (( moveOnly == 1 )); then
   i=0
   while (( i < ${#origFile[*]} )); do
-    logIt "MAIN" $LINENO "FUNC" "calling probeFile: "
+    echo -e " MAIN: calling ${C6}probeFile()${C0}"
     probeFile "${origFile[$i]}"
-    cat "$bookAuthor - $bookSeries - $bookTitle.info"
-    logIt "MAIN" $LINENO "FUNC" "calling moveIt:  ${origFile[$i]}"
+    # cat "$bookAuthor - $bookSeries - $bookTitle.info"
+    echo -e " MAIN: calling ${C6}moveIt() ${C0}${origFile[$i]}"
     moveIt "${origFile[$i]}"
     # Update convertLog with move information.
     echo "$(date +%b\ %d,\ %Y), [$bookType], ${origFile[$j]}" >> $convertLog
     ((i++))
   done
-  logIt "MAIN" $LINENO "FUNC" "calling cleanUp:  0"
+  echo -e " MAIN: calling ${C6}cleanUp()${C0} 0"
   cleanUp 0
 fi
 # -----------------------------------------------
 # Update only.
 # -----------------------------------------------
 if (( update == 1 )); then
-  logIt "MAIN" $LINENO "info" "inFile = ${origFile[0]}"
+  echo -e " MAIN: inFile = ${C6}${origFile[0]}${C0}"
   inFile="${origFile[0]}"
 
-  logIt "MAIN" $LINENO "FUNC" "calling probeFile:  \"$inFile\""
+  echo -e " MAIN: calling ${C6}probeFile() ${C3}$inFile${C0}"
   probeFile "$inFile"
 
-  if [[ -z $bookAuthor || -z $bookTitle ]]; then
-    echo "No tags for $inFile, bailing."
-    cleanUp 1
-  fi
-
-  logIt "MAIN" $LINENO "FUNC" "calling lookupMP3: "
+  echo -e " MAIN: calling ${C6}lookupMP3() ${C3}$inFile${C0}"
   lookupMP3 "$inFile"
-  logIt "MAIN" $LINENO "FUNC" "calling getInfo: "
+  echo -e " MAIN: calling ${C6}getInfo()${C0}"
   getInfo
 
   ext=$(echo "$inFile" | awk -F'.' '{print $(NF-1)"."$NF}')
-  logIt "MAIN" $LINENO "info" "ext = $ext"
-  outFile="${bookAuthor} - ${bookSeries} - ${bookTitle}.${ext}"
-  logIt "MAIN" $LINENO "info" "outFile = $outFile"
+  echo -e " MAIN: ext = ${C3}\$ext${C0}"
+  outFile[$j]="${bookAuthor} - ${bookSeries} - ${bookTitle}.${ext}"
+  echo -e " MAIN: outFile = ${C3}\${outFile[$j]}${C0}"
 
   # displayInfo
   echo -e "\n${C3}SOURCE: ${C4}${origFile[0]}${C0}"
-  echo -e "${C3}TARGET: ${C6}${outFile}${C0}"
-  echo -e "${C4}Sleeping...${C0}\n"
-  # sleep 5
+  echo -e "${C3}TARGET: ${C6}${outFile[$j]}${C0}"
 
-  if [[ "$inFile" != "./$outFile" ]]; then
-    logIt "MAIN" $LINENO "TRACE" "mv \"$inFile\" \"$outFile\""
-    mv "$inFile" "$outFile"
-    logIt "MAIN" $LINENO "FUNC" "calling tagIt:  \"$outFile\""
-    tagIt "$outFile"
+  if [[ "$inFile" != "./${outFile[$j]}" ]]; then
+    debugIt "mv \"$inFile\" \"${outFile[$j]}\""
+    mv "$inFile" "${outFile[$j]}"
+    echo -e " MAIN: calling tagIt:  \"${outFile[$j]}\""
+    tagIt "${outFile[$j]}"
   fi
 
   if (( move == 1 )); then
-    logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
-    displayInfo
-    logIt "MAIN" $LINENO "FUNC" "calling moveIt:  \"$outFile\""
-    moveIt "$outFile"
+    echo -e " MAIN: calling ${C6}moveIt() ${C3}\${outFile[$j]}${C0}"
+    moveIt "${outFile[$j]}"
   fi
 
-  logIt "MAIN" $LINENO "FUNC" "calling cleanUp:  0"
+  echo -e " MAIN: calling ${C6}cleanUp() ${C3}0${C0}"
   cleanUp 0
 fi
-
 
 # -----------------------------------------------
 # Concatenate files if option set.
 # -----------------------------------------------
 if (( concat == 1 )); then
-  logIt "MAIN" $LINENO "FUNC" "calling probeFile:  \"${origFile[0]}\""
+  echo -e " MAIN: calling ${C6}probeFile() ${C3}${origFile[0]}${C0}"
   probeFile "${origFile[0]}"
   STATUS=$?
 
   if (( STATUS > 0 )); then
-    logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
+    echo -e " MAIN: calling ${C6}displayInfo()${C0}"
     displayInfo
-    logIt "MAIN" $LINENO "FUNC" "calling promptTags:  \"${origFile[0]}\""
+    echo -e " MAIN: calling ${C6}promptTags() ${C3}${origFile[0]}${C0}"
     promptTags "${origFile[0]}"
   fi
 
   j=0
   while (( j < ${#origFile[*]} )); do
-    logIt "MAIN" $LINENO "FUNC" "calling checkFile:  \"${origFile[$j]}\""
+    echo -e " MAIN: calling ${C6}checkFile() ${C3}${origFile[$j]}${C0}"
     checkFile "${origFile[$j]}"
     CHECK=$?
-    logIt "MAIN" $LINENO "info" "checkFile:  status = $CHECK"
+    echo -e " MAIN: checkFile: status = ${C3}$CHECK${C0}"
 
     if (( CHECK == 1 )); then
-      logIt "MAIN" $LINENO "FUNC" "calling convert:  \"${origFile[$j]}\""
+      echo -e " MAIN: calling ${C6}convert() ${C3}${origFile[$j]}${C0}"
       convert "${origFile[$j]}"
     fi
     ((j++))
   done
-  logIt "MAIN" $LINENO "FUNC" "calling concatFiles: "
+
+  echo -e " MAIN: calling ${C6}concatFiles()${C0}"
   concatFiles
   STATUS=$?
 
   if (( STATUS > 0 )); then
-    logIt "MAIN" $LINENO "ERROR!" "concatFiles:  returned status: $STATUS"
+    echo -e " MAIN: ${C5}ERROR:${C3}$STATUS${C0} ${C6}concatFiles()${C0} returned error"
     exit 1
   fi
 
   j=0
-  unset origFile[*]
+  unset "origFile[*]"
   origFile[0]="ccab_concat.mp3"
-  logIt "MAIN" $LINENO "info" "origFile[0] = ${origFile[0]}"
+  echo -e " MAIN: origFile[0] = ${C3}${origFile[0]}${C0}"
 
-  logIt "MAIN" $LINENO "FUNC" "calling lookupMP3: "
-  lookupMP3 "$inFile"
+  echo -e " MAIN: calling ${C6}lookupMP3() ${C3}${origFile[0]}${C0}"
+  lookupMP3 "${origFile[0]}"
   STATUS=$?
 
   while (( STATUS > 0 )); do
-    logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
-    displayInfo
-    logIt "MAIN" $LINENO "FUNC" "calling promptTags:  \"${origFile[0]}\""
+    echo -e " MAIN: calling ${C6}promptTags() ${C3}${origFile[0]}${C0}"
     promptTags "${origFile[0]}"
-    logIt "MAIN" $LINENO "FUNC" "calling lookupMP3: "
-    lookupMP3 "$inFile"
+    echo -e " MAIN: calling ${C6}lookupMP3() ${C3}${origFile[0]}${C0}"
+    lookupMP3 "${origFile[0]}"
     STATUS=$?
   done
 
-  logIt "MAIN" $LINENO "FUNC" "calling getInfo: "
+  echo -e " MAIN: calling ${C6}getInfo()${C0}"
   getInfo
 
   echo -e "${C3}Found the following information:${C0}"
-  logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
+  echo -e " MAIN: calling ${C6}displayInfo()${C0}"
   displayInfo
+
   if (( tags == 1 )); then
     echo -e "${C3}Change book author = ${C4}$bookAuthor${C3}:${C0} \c"
-    read newAuthor
+    read -r newAuthor
     bookAuthor=${newAuthor:-$bookAuthor}
     echo -e "${C3}Change book title = ${C4}$bookTitle${C3}:${C0} \c"
-    read newTitle
+    read -r newTitle
     bookTitle=${newTitle:-$bookTitle}
     echo -e "${C3}Change series name = ${C4}$bookSeries${C3}:${C0} \c"
-    read newSeries
+    read -r newSeries
     bookSeries=${newSeries:-$bookSeries}
 
     # Update already created support files
@@ -1332,56 +1317,54 @@ if (( concat == 1 )); then
     fi
   fi
 
-  logIt "MAIN" $LINENO "FUNC" "calling reEncode:  \"${origFile[0]}\""
+  echo -e " MAIN: calling ${C6}reEncode() ${C3}${origFile[0]}${C0}"
   reEncode "${origFile[0]}"
   STATUS=$?
 
   if (( STATUS == 0 )); then
-    logIt "MAIN" $LINENO "FUNC" "calling tagIt:  \"${origFile[0]}\""
+    echo -e " MAIN: calling ${C6}tagIt() ${C3}${origFile[0]}${C0}"
     tagIt "${outFile[0]}"
   fi
 
+  # TODO Fix 'list.cc' file
   if (( remove == 1 )); then
-    while read LINE; do
-      logIt "MAIN" $LINENO "TRACE" "rm \"$LINE\""
+    while read -r LINE; do
+      debugIt "rm \"$LINE\""
       rm "$LINE"
     done < list.cc
   fi
 
   if (( move == 1 )); then
-    logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
+    echo -e " MAIN: calling ${C6}displayInfo()${C0}"
     displayInfo
-    logIt "MAIN" $LINENO "FUNC" "calling moveIt:  \"${origFile[0]}\""
+    echo -e " MAIN: calling ${C6}moveIt() ${C3}${origFile[0]}${C0}"
     moveIt "${outFile[0]}"
     echo "$(date +%Y.%m.%d), [$bookType], ${outFile[$j]}" >> $convertLog
   fi
 
-  logIt "MAIN" $LINENO "FUNC" "calling cleanUp: "
+  echo -e " MAIN: calling ${C6}cleanUp() ${C3}0${C0}"
   cleanUp 0
 fi
-
 
 # -----------------------------------------------
 # Process various files one at a time.
 # -----------------------------------------------
 j=0
 while (( j < ${#origFile[*]} )); do
-  logIt "MAIN" $LINENO "FUNC" "calling probeFile:  \"${origFile[$j]}\""
+  echo -e " MAIN: calling ${C6}probeFile() ${C3}\${origFile[$j]}${C0}"
   probeFile "${origFile[$j]}"
   STATUS=$?
 
   if (( STATUS > 0 )); then
-    logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
-    displayInfo
-    logIt "MAIN" $LINENO "FUNC" "calling promptTags:  \"${origFile[$j]}\""
+    echo -e " MAIN: calling ${C6}promptTags() ${C3}\${origFile[$j]}${C0}"
     promptTags "${origFile[$j]}"
   fi
 
-  logIt "MAIN" $LINENO "FUNC" "calling checkFile:  \"${origFile[$j]}\""
+  echo -e " MAIN: calling ${C6}checkFile() ${C3}\${origFile[$j]}${C0}"
   checkFile "${origFile[$j]}"
   STATUS=$?
 
-  logIt "MAIN" $LINENO "info" "checkFile status = $STATUS"
+  echo -e " MAIN: checkFile status = ${C3}$STATUS${C0}"
   case $STATUS in
     1) # m4a/m4b file, need to convert
        recodeFlag=1
@@ -1409,50 +1392,45 @@ while (( j < ${#origFile[*]} )); do
        ;;
   esac
 
-  logIt "MAIN" $LINENO "FUNC" "calling lookupMP3: "
-  lookupMP3 "$inFile"
+  echo -e " MAIN: calling ${C6}lookupMP3() ${C3}\${origFile[$j]}${C0}"
+  lookupMP3 "${origFile[$j]}"
   STATUS=$?
 
   while (( STATUS > 0 )); do
-    logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
-    displayInfo
-    logIt "MAIN" $LINENO "FUNC" "calling promptTags:  \"${origFile[$j]}\""
+    echo -e " MAIN: calling ${C6}promptTags() ${C3}\${origFile[$j]}${C0}"
     promptTags "${origFile[$j]}"
-    logIt "MAIN" $LINENO "FUNC" "calling lookupMP3: "
-    lookupMP3 "$inFile"
+    echo -e " MAIN: calling ${C6}lookupMP3() ${C3}\${origFile[$j]}${C0}"
+    lookupMP3 "${origFile[$j]}"
     STATUS=$?
   done
 
-  logIt "MAIN" $LINENO "FUNC" "calling getInfo: "
+  echo -e " MAIN: calling ${C6}getInfo()${C0}"
   getInfo
-  echo -e "${C3}Found the following information:${C0}"
-  logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
+
+  echo -e " MAIN: calling ${C6}displayInfo()${C0}"
   displayInfo
 
   if [[ $recodeFlag -eq 1 && $m4bFlag -eq 1 ]]; then
-    logIt "MAIN" $LINENO "FUNC" "calling convert:  \"${origFile[$j]}\""
+    echo -e " MAIN: calling ${C6}convert() ${C3}\${origFile[$j]}${C0}"
     convert "${origFile[$j]}"
-    logIt "MAIN" $LINENO "FUNC" "calling tagIt:  \"${origFile[$j]}\""
+    echo -e " MAIN: calling ${C6}tagIt() ${C3}\${origFile[$j]}${C0}"
     tagIt "${outFile[$j]}"
-    logIt "MAIN" $LINENO "info" "origFile[$j] = ${origFile[$j]}"
-    origFile[$j]="${outFile[$j]}"
+    origFile[$j]=${outFile[$j]}
     removeMP3=1
   fi
 
   if (( recodeFlag == 1 )); then
-    logIt "MAIN" $LINENO "FUNC" "calling reEncode:  \"${origFile[$j]}\""
+    echo -e " MAIN: calling ${C6}reEncode() ${C3}\${origFile[$j]}${C0}"
     reEncode "${origFile[$j]}"
     STATUS=$?
 
     if (( STATUS == 0 )); then
-      logIt "MAIN" $LINENO "FUNC" "calling tagIt:  \"${origFile[$j]}\""
+      echo -e " MAIN: calling ${C6}tagIt() ${C3}\${origFile[$j]}${C0}"
       tagIt "${outFile[$j]}"
     fi
 
     if (( move == 1 )); then
-      logIt "MAIN" $LINENO "FUNC" "calling displayInfo: "
-      displayInfo
-      logIt "MAIN" $LINENO "FUNC" "calling moveIt:  \"${origFile[$j]}\""
+      echo -e " MAIN: calling ${C6}moveIt() ${C3}\${origFile[$j]}${C0}"
       moveIt "${outFile[$j]}"
       # Update convertLog with book info
       echo "$(date +%Y.%m.%d), [$bookType], ${outFile[$j]}" >> $convertLog
@@ -1460,12 +1438,13 @@ while (( j < ${#origFile[*]} )); do
   fi
 
   if (( removeMP3 == 1 )); then
-    logIt "MAIN" $LINENO "TRACE" "rm \"${origFile[$j]}\""
+    debugIt "rm \"${origFile[$j]}\""
     rm "${origFile[$j]}"
   fi
   removeMP3=0
   ((j++))
 done
 
-logIt "MAIN" $LINENO "FUNC" "calling cleanUp: "
+echo -e " MAIN: calling ${C6}cleanUp() ${C3}0${C0}"
 cleanUp 0
+
