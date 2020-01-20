@@ -22,7 +22,11 @@ i=0
 for _FILE in *.$inFileExt; do
   inFile[$i]="$_FILE"
   ## Specify where and what output file.
-  outFile[$i]="./mp3/${inFile[$i]%.*}.mp3"
+  if [[ $inFileExt == 'mp3' || $inFileExt == 'flac' ]]; then
+    outFile[$i]="./tmp/${inFile[$i]%.*}.mp3"
+  elif [[ $inFileExt == 'mp4' || $inFileExt == 'mkv' ]]; then
+    outFile[$i]="./tmp/${inFile[$i]%.*}.mp4"
+  fi
   ((i++))
 done 
 
@@ -32,14 +36,15 @@ if [[ ${inFile[0]} == "*.$inFileExt" ]]; then
 fi
 
 ## Create sub-directory for new mp3 files.
-mkdir ./mp3 >/dev/null 2>&1
+mkdir ./tmp >/dev/null 2>&1
 
 i=0
 while [[ $i -lt ${#inFile[*]} ]]; do
   echo -e ">>> Processing file $((i + 1)) of ${#inFile[*]} <<<"
   echo -e "Re-copying ${inFile[$i]}..."
   #shellcheck disable=SC2086,SC2090
-  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" -c:a copy "${outFile[$i]}"
+  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" -c:v copy -c:a copy "${outFile[$i]}"
+  #ffmpeg -hide_banner -stats -y -i "${inFile[$i]}" -c:v copy -c:a copy "${outFile[$i]}"
   STATUS=$?
   echo -e "\n< inFile: ${inFile[$i]}"
   mediainfo "${inFile[$i]}" | sed -n '/^Audio/,/^Writing/p'
@@ -53,4 +58,4 @@ while [[ $i -lt ${#inFile[*]} ]]; do
 done
 
 ## Remove temp directory if empty.
-rmdir ./mp3 >/dev/null 2>&1
+rmdir ./tmp >/dev/null 2>&1
