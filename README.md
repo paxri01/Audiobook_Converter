@@ -1,17 +1,17 @@
 # Audiobook Converter
 
-## DESCRIPTION
+### DESCRIPTION
 
 Linux shell script to combine/reformat various audiobooks files into a single
 .mp3 with tags and info.
 
-## PURPOSE
+### PURPOSE
 
 This script is used to reformat multiple audio files (.mp3, .m4a, .m4b) into a
 single .mp3 file that includes the book cover, IDv3 tags and book description
-from Goodreads.com site.
+from goodreads.com site.
 
-## USAGE
+### USAGE
 
 ```bash
 ccab.sh [-c ||--concat] [-m ||--move] [-mo] [-mp3] [-m4b] [-r] [-v]
@@ -34,7 +34,7 @@ ccab.sh [-c ||--concat] [-m ||--move] [-mo] [-mp3] [-m4b] [-r] [-v]
    -x || --remove    : Remove source files after conversion (DANGEROUS!).
 ```
 
-## REQUIREMENTS
+### REQUIREMENTS
 
 The following packages are require to use this script.
 
@@ -48,11 +48,11 @@ The following packages are require to use this script.
 **NOTE:** You will also need to modify the user parameters to set outgoing
 directories and log locations.
 
-# CHANGES
+## CHANGES
 
-## CHG0001 - 2018.05.15
+### CHG0001 - 2018.05.15
 
 * Cleanup file list after completion.
-* Fix apostropes in concatenated file list.
+* Fix apostrophes in concatenated file list.
 * Set permissions on output directory.
 * Update README.md
