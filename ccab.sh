@@ -1,222 +1,168 @@
 #!/bin/bash
 
-#########################################################################################
-#  SCRIPT: ccab.sh
-#  AUTHOR: R. Paxton
-#  DATE:   09/25/2016
-#  UPDATED: 03/05/2017 - rlp
-#
-#  PURPOSE: This script is used to scan and re-encode audiobooks. It will detect
-#           m4a, m4b, or mp3 files and re-encode them to a target bitrate
-#           (default 48K) or less if source is lower.  The script will attempt
-#           to lookup the audiobook on Goodreads web site based on the ID3 tags.
-#           If the lookup fails, the script will prompt for book information.
-#
-#           The script is controlled via the command options as listed below.
-#
-#########################################################################################
-#
-#  USAGE:   ccab.sh [-c ||--concat] [-m ||--move] [-mo] [-mp3] [-m4b] [-r] [-t] [-v]
-#
-#  -c || --concat : Will combine detected files into a single .mp3
-#  -d || --debug  : Enable debug output.
-#  -m || --move   : After re-encoding, will move new files to specified
-#                   directory (baseDir). May add option value on the command
-#                   line to avoid prompting if book type is know before hand
-#                   (-m #).
-#  -mo      : Will move previously encoded files to target directory.
-#  -mp3     : Will limit search of input files to .mp3 files only.
-#  -m4b     : Will limit search of input files to .m4a or .m4b files
-#             only.
-#  -r       : Will search subdirectories for input files, make sure
-#             subdirectories or zero padded if more that 9 subs (ex.
-#             /disk 1 ==> /disk 01).
-#  -t       : Edit discovered IDv3 tags before writing.
-#  --trace  : Enable trace loggin during run.
-#  -v       : Will prompt for verification of detected book information.
-#
-#  NOTE: Other options are not fully implemented.
-#
-#########################################################################################
-#
-#  DEBUG: Debug output can be enable by specifying the -d or --debug option
-#         along with the level of debug [1 or 2].
-#
-#  CONVERTED: If $convertLog specified, successful encodes will be logged to
-#             this file, to track what files have been processed.
-#
-#########################################################################################
-
-
-### START OF USER OPTIONS ###
-
-targetBitrate=48                                 # Set this to desired bitrate for output files.
-logDir='/var/log/ccab'                           # Working directory (logs and such)
-baseDir='/audio/audiobooks'                      # Base directory to move encoded files to.
-convertLog="$logDir/converted.log"               # Successful encoding log file.
-workDir='/tmp/ccab.tmp'                          # Temp directory for work files (removed if successful).
+## User parameters
+targetBitrate=48
+logDir='/var/log/ccab'
+baseDir='/audio/audiobooks'
+convertLog="$logDir/converted.log"
 user='rp01'
 group='admins'
 
-### END OF USER OPTIONS ###
+## Verify temp directory
+if [[ ! -d '/tmp/ccab' ]]; then
+  mkdir /tmp/ccab
+fi
+workDir=$(sudo mktemp -d /tmp/ccab/tmp.XXXXX)
+sudo chown $user:$group "$workDir"
 
-mkdir -p "$logDir" >/dev/null 2>&1
-mkdir -p "$workDir" >/dev/null 2>&1
+## Verify log directory
+if [[ ! -d '/var/log/ccab' ]]; then
+  sudo mkdir /var/log/ccab
+  sudo chown $user:$group /var/log/ccab
+  sudo chmod 775 /var/log/ccab
+fi
 
-# Declare global variables
-typeset searchType bookTitle bookAuthor bookSeries bookBitrate baseName bookURL searchInfo outFile bookType
+## Verify base directory
+if [[ ! -d "$baseDir" ]]; then
+  echo "${C5}[RC:2] ERROR, ${C0}Base directory does not exist, bailing."
+  exit 2
+fi
 
-concat=false
-recurse=false
-move=false
-options=$*
+trap 'cleanUp 1' 1 2 3 15
 
-trap 'abort' 1 2 3 15
-
+## Define color outputs
 C1="$(printf '\033[38;5;040m')"  # Green
 C2="$(printf '\033[38;5;236m')"  # Grey
 C3="$(printf '\033[38;5;254m')"  # Hi-Lite
 C4="$(printf '\033[38;5;184m')"  # Yellow
 C5="$(printf '\033[38;5;160m')"  # Red
 C6="$(printf '\033[38;5;164m')"  # Purple
-C7="$(printf '\033[38;5;063m')"  # Blue
+C7="$(printf '\033[38;5;070m')"  # Lt Green
 C8="$(printf '\033[38;5;240m')"  # Lt Grey
 C0="$(printf '\033[0;00m')"      # Reset
 
-# Check for command line arguments.
-if [ "$#" -lt 1 ]; then
-  cat << EOM
-    -c || --concat    : Will combine detected files into a single .mp3
-    -d || --debug     : Enable debug output (must specify level [1 or 2]
-    -m || --move      : After re-encoding, will move new files to specified
-                        directory (baseDir). May add option value on the command
-                        line to avoid prompting if book type is know before hand
-                        (-m #).
-                         Move Catagories:
-                            1 = Romance
-                            2 = Hot
-                            3 = SciFi
-                            4 = Fantasy
-                            5 = Thriller
-                            6 = Misc
-    -mp3              : Will limit search of input files to .mp3 files only.
-    -m4b              : Will limit search of input files to .m4a or .m4b files
-                        only.
-    -r || --recurse   : Will search subdirectories for input files, make sure
-                        subdirectories are zero padded if more that 9 subs (ex.
-                        /disk 1 ==> /disk 01).
-
-EOM
-  exit 1
-fi
-
-# -----------------------------------------------
-# Check for required packages.
-# -----------------------------------------------
-command -v ffprobe >/dev/null 2>&1 || { echo "ERROR: Unable to detect ffprobe, bailing." >&2; exit 1; }
-  echo " > sudo yum -y install ffmpeg"
-command -v ffmpeg >/dev/null 2>&1 || { echo "ERROR: Unable to detect ffmpeg, bailing." >&2; exit 1; }
-  echo " > sudo yum -y install ffmpeg"
-command -v mid3v2 >/dev/null 2>&1 || { echo "ERROR: Unable to detect mid3v2, bailing." >&2; \
-  echo "  > sudo git clone https://github.com/quodlibet/mutagen.git /downloads/mid3v2"; exit 1; }
-command -v fancy_audio >/dev/null 2>&1 || { echo "ERROR: Unable to detect fancy_audio, bailing." >&2; \
-  echo "  > sudo gem install fancy_audio"; exit 1; }
-command -v googler >/dev/null 2>&1 || { echo "ERROR: Unable to detect googler, bailing." >&2; \
-  echo "  > sudo git clone https://github.com/jarun/googler.git /downloads/googler"; exit 1; }
-command -v curl >/dev/null 2>&1 || { echo "ERROR: Unable to detect curl, bailing." >&2; exit 1; }
-  echo "  > sudo yum -y install curl"
-command -v lame >/dev/null 2>&1 || { echo "ERROR: Unable to detect lame, bailing." >&2; exit 1; }
-  echo "  > sudo yum -y install lame"
-
-# -----------------------------------------------
-# Get user options
-# -----------------------------------------------
-while [[ $# -gt 0 ]]; do
-  key="$1"
-  case $key in
-    -b | --bitrate) # Target bitrate
-      targetBitrate=${2:-48}
-      shift 2
-      ;;
-    -c | --concat) # Concat all files found
-      concat='true'
-      shift
-      ;;
-    -d | --debug) # Set debug level
-      set -x
-      shift
-      ;;
-    -m | --move)  # Move output files to defined location
-      move='true'
-      catagory=$2
-      if [[ $catagory = '-'[a-z] || -z $catagory ]]; then
-        unset catagory
-        shift
-      else
-        shift 2
-      fi
-      ;;
-    --mp3) # only search for mp3 files
-      searchType=".*\(mp3\)$"
-      shift
-      ;;
-    --flac) # only search for mp3 files
-      searchType=".*\(flac\)$"
-      shift
-      ;;
-    --m4b) # only search for m4a/m4b files
-      searchType=".*\(m4a\|m4b\)$"
-      shift
-      ;;
-    -r | --recurse) # Search sub directories for files
-      recurse=true
-      shift
-      ;;
-    *)  # Unknown option
-      echo -e "${C5}ERROR: 10 - Unknown option '$1'${C0}"
-      exit 10
-      ;;
-  esac
-done
-
-# -----------------------------------------------
-# Define script functions
-# -----------------------------------------------
-abort()
-{
-  tput cnorm
-  exit 9
+## Check for required packages
+command -v ffmpeg >/dev/null || {
+  echo "${C5}[RC:10] ERROR, ${C3}ffmpeg${C0} not found in \$PATH, Install: ${C1}sudo dnf install ffmpeg${C0}";
+  exit 10;
 }
+command -v mid3v2 >/dev/null || {
+  echo "${C5}[RC:11] ERROR, ${C3}mid3v2${C0} not found in \$PATH, Install: ${C1}sudo pip install mutagen${C0}";
+  exit 11;
+}
+command -v fancy_audio >/dev/null || {
+  echo "${C5}[RC:12] ERROR, ${C3}fancy_audio${C0} not found in \$PATH, Install: ${C1}sudo gem install fancy_audio${C0}";
+  exit 12;
+}
+# Dead project :(
+#command -v googler >/dev/null || {
+#  echo "${C5}[RC:13] ERROR, ${C3}googler${C0} not found in \$PATH, Install: ${C1}sudo dnf install googler${C0}";
+#  exit 13;
+#}
+command -v curl >/dev/null || {
+  echo "${C5}[RC:14] ERROR, ${C3}curl${C0} not found in \$PATH, Install: ${C1}sudo dnf install curl${C0}";
+  exit 14;
+}
+command -v lame >/dev/null || {
+  echo "${C5}[RC:15] ERROR, ${C3}lame${C0} not found in \$PATH, Install: ${C1}sudo dnf install lame${C0}";
+  exit 15;
+}
+command -v sweech >/dev/null ||
+  echo "${C4}[RC:16] Warning, ${C3}sweech${C0} not found in \$PATH, (Optional) Install: ${C1}sudo pip install sweech-cli${C0}"
+
+## Set global flags
+typeset -a tmpTitle tmpURLs baseName bookInfo bookBitrate encodeFile outDir
+typeset catFile bookType
+clean=true
+concat=false
+debug=false
+move=false
+recurse=false
+verify=false
 
 cleanUp()
 {
   STATUS=$1
+  tput cnorm
 
   if (( STATUS == 0 )); then
-    echo -e "${C8}INFO${C0}: Cleaning temp files"
-    rm -rf "${workDir:?}"
-  fi
 
-  echo -e "${C1}\nDone!${C0} STATUS: ${C3}$STATUS${C0}"
+    if $clean; then
+      echo -e "${C8}>>> Cleaning temp files${C0}"
+      sudo rm -rf "${workDir:?}"
+    else
+      echo -e "${C8}INFO: Work directory = $workDir${C0}"
+    fi
+
+    echo -e "${C1}[RC:$STATUS] Done!${C0}"
+
+  elif (( STATUS == 1 )); then
+    tput cnorm
+    echo -e "${C4}[RC:$STATUS] Abnormal end, temp directory [${C8}$workDir${C4}]${C0}"
+
+  else
+    tput cnorm
+    echo -e "${C5}[RC:$STATUS] Error during run, aborting.${C0} [$workDir]"
+  fi
+  
   exit "$STATUS"
+}
+
+usage()
+{
+  cat << EOM
+
+${C3}NAME${C0}
+    ccab - re-encode audio files.
+
+${C3}OPTIONS${C0}
+    ${C1}-c${C0}, ${C1}--concat${C0}
+        Will combine detected files into a single .mp3 file.
+    ${C1}-d${C0}, ${C1}--debug${C0}
+        Enable debug output.
+    ${C1}--flac${C0}
+        Will limit search of input files to .flac files only.
+    ${C1}-h${C0}, ${C1}--help${C0}
+        Display this help message.
+    ${C1}-m${C0}, ${C1}--move${C0}
+        After re-encoding, will move new files to specified directory (baseDir).
+        May add option value on the command line to avoid prompting if book
+        type is know before hand [-m #].
+            Move Catagories:
+               1 = Romance
+               2 = Hot
+               3 = SciFi
+               4 = Fantasy
+               5 = Thriller
+               6 = Misc
+    ${C1}--m4b${C0}
+        Will limit search of input files to .m4a or .m4b files only.
+    ${C1}--mp3${C0}
+        Will limit search of input files to .mp3 or .mp4 files only.
+    ${C1}-r${C0}, ${C1}--recurse${C0}
+        Will search subdirectories for input files, make sure subdirectories are
+        zero padded if more that 9 subs (ex. /disk 1 ==> /disk 01).
+    ${C1}-v${C0}, ${C1}--verify${C0}
+        Verify ID3 tags.
+
+EOM
+
+  return 0
 }
 
 getFiles()
 {
   ## Collect incoming files
-  fileList="$workDir"/ccab_files.list
-  searchType=${searchType:-'\(mp3\|m4a\|m4b\|flac\)'}
-  
-  if [[ ! -d "$workDir" ]]; then
-    mkdir "$workDir"
-  fi
+  fileList="$workDir/concat_files.list"
+  searchType=${searchType:-'.*\.\(mp3\|m4a\|m4b\|flac\|mp4\)'}
+  inDir=${inDir:-$PWD}
   
   if [[ $recurse == 'true' ]]; then
-    find . -type f -iregex ".*.${searchType}" -printf '%h/%f\n' |\
-      grep -v 'ccab' | sort -h > $fileList
+    find "$inDir" -type f -iregex ".*.${searchType}" -printf '%h/%f\n' |\
+      grep -v 'ccab' | sort -V > "$fileList"
   else
-    find . -maxdepth 1 -type f -iregex ".*.${searchType}" -printf '%h/%f\n' |\
-      grep -v 'ccab' | sort -h > $fileList
+    find "$inDir" -maxdepth 1 -type f -iregex ".*.${searchType}" -printf '%h/%f\n' |\
+      grep -v 'ccab' | sort -V > "$fileList"
   fi
   
   mapfile -t inFiles < <(cat "$fileList")
@@ -226,61 +172,75 @@ getFiles()
 
 probeFile()
 {
+  inFile=$1
+  index=$2
   # Gather information on the book (title, series, info, etc.).
-  probeFile="$workDir/probe.txt"
+  probeFile="$workDir/$(basename "${inFile%.*}").probe"
+  echo -e "${C8}>>> probing $(basename "$inFile")${C0}"
 
-  # set -x
+  #set -x
   inFile="$1"
 
+  if $debug; then
+    echo -e "${C8}++ffprobe -hide_banner \"$inFile\" >\"$probeFile\"${C0}"
+  fi
   ffprobe -hide_banner "$inFile" >"$probeFile" 2>&1
 
-  album=$(sed -n 's/\ *album\ *:\ \(.*\)$/\1/p' "$probeFile")
-  artist=$(sed -n 's/\ *artist\ *:\ \(.*\)$/\1/p' "$probeFile")
-  author=$(sed -n 's/\ *author\ *:\ \(.*\)$/\1/p' "$probeFile")
-  album_artist=$(sed -n 's/\ *album_artist\ *:\ \(.*\)$/\1/p' "$probeFile")
-  title=$(sed -n 's/\ *title\ *:\ \(.*\)$/\1/p' "$probeFile")
-  date=$(sed -n 's/\ *date\ *:\ \(.*\)$/\1/p' "$probeFile")
+  _album=$(sed -rn 's/\ +album\ *:\ (.[^:]*).*/\1/p' "$probeFile")
+  _artist=$(sed -rn 's/\ +artist\ *:\ (.*)$/\1/p' "$probeFile")
+  _author=$(sed -rn 's/\ +author\ *:\ (.*)$/\1/p' "$probeFile")
+  _album_artist=$(sed -rn 's/\ +album_artist\ *:\ (.*)$/\1/p' "$probeFile")
+  _title=$(grep -m 1 'title' "$probeFile" | sed -rn 's/.* : (.[^:]*).*/\1/p')
+  _date=$(sed -rn 's/\ +date\ *:\ (.*)$/\1/p' "$probeFile")
 
   ## Set book title
-  bookTitle="${album:-$title}"
+  _bookTitle="${_album:-$_title}"
+  # _bookTitle="${_title:-$_album}"
+  _bookTitle=${_bookTitle//[^a-zA-Z ]/}
 
   ## Set book author.
-  bookAuthor="${author:-$artist}"
-  bookAuthor="${bookAuthor:-$album_artist}"
-  ## Fix accented names
-  bookAuthor=${bookAuthor/É/E}
+  _bookAuthor="${_author:-$_artist}"
+  _bookAuthor="${_bookAuthor:-$_album_artist}"
 
-  if [[ -z $bookTitle ]]; then
-    echo -e "${C3}Enter the title of the book${C0} [$bookTitle]: \c"
-    read -r tempTitle
-    bookTitle=${tempTitle:-$bookTitle}
+  if [[ -z $_bookTitle ]]; then
+    echo -e "${C4}Enter the title of the book${C0} [$_bookTitle]: \c"
+    read -r _tempTitle
+    _bookTitle=${_tempTitle:-$_bookTitle}
   fi
 
-  if [[ -z $bookAuthor ]]; then
-    echo -e "${C3}Enter the author of the book${C0} [$bookAuthor]: \c"
-    read -r tempAuthor
-    bookAuthor=${tempAuthor:-$bookAuthor}
+  if [[ -z $_bookAuthor ]]; then
+    echo -e "${C4}Enter the author of the book${C0} [$_bookAuthor]: \c"
+    read -r _tempAuthor
+    _bookAuthor=${_tempAuthor:-$_bookAuthor}
   fi
+
+  #set +x
  
-  origBitrate=$(grep 'Audio:' "$probeFile" | awk -F', ' '{ print $5 }' | awk '{ print $1 }')
-  if [[ $origBitrate -gt $targetBitrate ]]; then
-    bookBitrate=$targetBitrate
-  elif [[ $origBitrate -gt 40 ]]; then
-    bookBitrate=48
+  _origBitrate=$(grep 'Audio:' "$probeFile" | awk -F', ' '{ print $5 }' | awk '{ print $1 }')
+  if [[ $_origBitrate -gt $targetBitrate ]]; then
+    _bookBitrate=$targetBitrate
+  elif [[ $_origBitrate -gt 40 ]]; then
+    _bookBitrate=48
   else
-    bookBitrate=32
+    _bookBitrate=32
   fi
 
-  bookDate="$date"
+  bookTitle[$index]="$_bookTitle"
+  bookAuthor[$index]="$_bookAuthor"
+  bookBitrate[$index]="$_bookBitrate"
+  bookDate[$index]="$_date"
 
+  shortDir="$(sed -rn 's;^/\w+/\w+/(.*);\1;p' <<< "$(dirname "$inFile")")"
   cat <<EOF
-  bookTitle          =  $bookTitle
-  bookAuthor         =  $bookAuthor
-  bookBitrate        =  $bookBitrate
-  bookDate           =  $bookDate
+  ${C8}In File: ${C0}$(basename "$inFile")${C8}
+  Directory: ${C0}${shortDir:0:80}${C8}
+  Found Title: ${C0}${bookTitle[$index]:0:80}${C8}
+  Found Author: ${C0}${bookAuthor[$index]:0:80}${C8}
+  Found Bitrate: ${bookBitrate[$index]}
+  Found Date: ${bookDate[$index]}${C0}
 EOF
 
-  if [[ -z $bookTitle || -z $bookAuthor ]]; then
+  if [[ -z ${bookTitle[$index]} || -z ${bookAuthor[$index]} ]]; then
     echo -e "${C5}ERROR:${C0} No book information found."
     return 1
   else
@@ -288,155 +248,242 @@ EOF
   fi
 }
 
-searchInfo()
+searchIt()
 {
-  searchData="$1"
-    searchData=$(sed 's/([Uu]nabridged)//' <<< "$searchData")
+  _searchData=$1
+  _results="$workDir/results.html"
+  url="www.goodreads.com"
 
-  ## Search for book information on goodreads.
-  searchResults="$workDir/search.results"
-  searchInfo="$workDir/search.html"
-  searchRaw="$workDir/search.raw"
-  result=0
+  _searchData=${_searchData//[Uu]nabridged/}
+  echo -e "\n${C8}>>> Searching for: '${_searchData// /+}'${C0}\n"
+  _searchData="https://${url}/search?q=${_searchData// /+}"
+  echo -e "${C2}$_searchData${C0}"
+  curl -s "$_searchData" > "$_results"
 
-  if [[ ! -d "$workDir" ]]; then
-    mkdir "$workDir"
-  fi
+  mapfile -t tmpURLs < <(grep '<a title=' "$_results" | sed -rn "s/.*href=\"(.[^?]*).*/https:\/\/${url}\1/p")
+  mapfile -t tmpTitle < <(grep '<span ' "$_results" | grep 'role=.heading.' | awk -F'[><]' '{ print $3 }')
 
-  if [[ -n $searchData ]]; then
-    echo -e "Search string: ${C4}$searchData${C0}"
-    googler -n 5 --np -w www.goodreads.com "$searchData" | tee "$searchResults"
-  else
-    result=6
-  fi
-
-  while [[ $result -lt 1 || $result -gt 5 ]]; do
-    if [[ $result -eq 6 ]]; then
-      echo -e "${C4}Enter new search string: ${C0}\c"
-      read -r searchData
-      googler -n 5 --np -w www.goodreads.com "$searchData" | tee "$searchResults"
-      result=0
-    elif [[ $result -eq 7 ]]; then
-      echo -e "${C4}Enter book URL manually: ${C0}\c"
-      read -r bookURL
-      break
-    else
-      echo -e "${C6}Pick the number of the link results to use for info ('6' for new search, '7' direct URL):${C0} \c"
-      read -r result
-    fi
+  i=0
+  while (( i < ${#tmpTitle[*]} )); do
+    echo -e "${C4}$((i + 1)). ${C3}${tmpTitle[$i]}${C0}"
+    echo -e "   ${C8}${tmpURLs[$i]}${C0}"
+    echo ""
+    ((i++))
   done
 
-  if [[ -z "$bookURL" ]]; then
-    mapfile -t tmpURLs < <(grep 'www.goodreads.com' "$searchResults" | tr -d ' ')
-    bookURL=${tmpURLs[((result - 1))]}
-  fi
+  return 0
+}
 
-  echo "  bookURL = $bookURL"
+searchInfo()
+{
+  inFile=$1
+  index=$2
+  searchInfo="$workDir/$(basename "${inFile%.*}").html"
+  searchRaw="$workDir/$(basename "${inFile%.*}").raw"
+  
+  searchData="${bookTitle[$index]}+${bookAuthor[$index]}"
+  searchData=${searchData//([Uu]nabridged)/}
 
-  if [[ -n $bookURL ]]; then
-    curl -sL "$bookURL" -o "$searchRaw"
-    hxnormalize -l 9999 < "$searchRaw" > $searchInfo 2>/dev/null
-    return 0
-  else
-    echo "No book URL found, bailing."
-    return 1
-  fi
+  ## Search and display results
+  searchIt "$searchData"
+
+  ## Choose book results to process
+  result=0
+  while [[ -z ${bookURL[$index]} ]]; do
+    echo -e "${C4}Choose result number for info or '0' for direct URL:${C0} \c"
+    read -r result
+
+    case $result in
+      [1-9]) # Selected info from current dataset.
+        bookURL[$index]=${tmpURLs[((result - 1))]}
+        echo -e "\n${C8}INFO: bookURL = ${bookURL[$index]}${C0}"
+        ;;
+      1[0-9]) # Enter new search data and search again
+        bookURL[$index]=${tmpURLs[((result - 1))]}
+        echo -e "\n${C8}INFO: bookURL = ${bookURL[$index]}${C0}"
+        ;;
+      0) # Manually enter book URL
+        echo -e "\n  ${C6}Enter book URL: ${C0}\c"
+        read -r bookURL[$index]
+        ;;
+      s|S) # New search criteria
+        echo -e "\n Enter new search criteria: \c"
+        read -r searchData
+        searchIt "$searchData"
+        ;;
+      *) # Invalid option
+        echo -e "\n  ${C5}Invalid option '$result'.${C0}\n"
+        ;;
+    esac
+  done
+
+  ## Retrieve book information
+  echo -e "${C8}\n>>> Retrieving book information...${C0}"
+  while [[ ! -s "$searchRaw" ]]; do
+    if $debug; then
+      echo -e "${C2}++curl -sL \"${bookURL[$index]}\" -o \"$searchRaw\"${C0}"
+    fi
+    curl -sL "${bookURL[$index]}" -o "$searchRaw"
+    sleep 2
+  done
+
+  ## Attempt to normalize html results
+  hxnormalize -l 9999 < "$searchRaw" > "$searchInfo" 2>/dev/null
+
+  return 0
 }
 
 parseInfo()
 {
+  ## NOTE: This is prone to failure due to many different versions of returned
+  ##       data.  Multiple methods are used to attempt to gather as much as
+  ##       possible.
+
+  inFile=$1
+  index=$2
+  searchInfo="$workDir/$(basename "${inFile%.*}").html"
+  echo -e "${C8}>>> Parsing information...${C0}"
+
   ## Scrape results for book information.
-  title1=$(grep 'property=.og:title' "$searchInfo" | awk -F'[""]' '{ print $2 }')
-  title2=$(grep -m 1 '<title>' "$searchInfo" | hxselect -ic title | awk -F' by ' '{ print $1 }')
+  title1=$(grep -m 1 '<title>' "$searchInfo" | hxselect -ic title | awk -F' by ' '{ print $1 }')
+  title2=$(grep 'property=.og:title' "$searchInfo" | sed -rn 's/.*content=(.*) property.*/\1/p')
   fullTitle=${title1:-$title2}
-  bookTitle=$(sed -n 's/\(.*\) (.*)/\1/p' <<< "$fullTitle")
+  fullTitle=${fullTitle/&amp;/&}
+  if $debug; then
+    echo -e "${C2}++fullTitle=$fullTitle${C0}"
+  fi
+  _bookTitle=$(sed -n 's/\(.*\) (.*)/\1/p' <<< "$fullTitle")
+  _bookTitle=${_bookTitle:-$title1}
+  _bookTitle=${_bookTitle/&amp;/&}
+  _bookTitle=${_bookTitle//:/-}
+  _bookTitle=${_bookTitle//é/e}
+  _bookTitle=${_bookTitle//[^a-zA-Z0-9 -&]/}
+  bookTitle[$index]="$_bookTitle"
 
   author=$(grep -m 1 '<title>' "$searchInfo" | hxselect -ic title | awk -F' by ' '{ print $2 }')
-  bookAuthor=${author:-$bookAuthor}
-    bookAuthor=${bookAuthor/É/E}
+  _bookAuthor=${author:-$_bookAuthor}
+    _bookAuthor=${_bookAuthor/É/E}
+    _bookAuthor=${_bookAuthor//[^a-zA-Z0-9 -.]/}
   ## Reverse author name and strip any ending '.'
-  bookAuthorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$bookAuthor" | sed 's/\.$//')
+  _bookAuthorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$_bookAuthor" | sed 's/\.$//')
+  bookAuthor[$index]="$_bookAuthor"
+  bookAuthorReverse[$index]="${_bookAuthorReverse:-$_bookAuthor}"
 
-  bookISBN=$(grep -m 1 'itemprop=isbn' "$searchInfo" | hxselect -ic div)
-  bookYear=$(grep -m 1 'Published' "$searchInfo" | sed -rn 's/.*([0-9]{4}).*/\1/p')
+  #bookISBN[$index]=$(grep -m 1 'itemprop=isbn' "$searchInfo" | hxselect -ic div | awk '{ print $1 }')
+  bookISBN[$index]=$(grep 'books:isbn' "$searchInfo" | sed -rn 's/.*tent=(.*) prop.*/\1/p')
+
+  pubInfo=$(grep -m 1 -P 'Published.*[1-2][0-9]{3}' "$searchInfo" | sed -rn 's/.*(Pub.*)<.*/\1/p')
+  bookYear[$index]=$(sed -rn 's/.*([0-9]{4}).*/\1/p' <<< "$pubInfo")
+  bookPublisher[$index]=$(awk -F' by ' '{ print $2 }' <<< "$pubInfo")
 
   if grep -q '(' <<< "$fullTitle"; then
     fullSeries=$(awk -F'[()]' '{ print $2 }' <<< "$fullTitle")
-    if grep -q ', #' <<< "$fullSeries"; then
-      sep=1
-    elif grep -q ' Book ' <<< "$fullSeries"; then
-      sep=2
-    else
-      sep=3
-    fi
+  else
+    fullSeries=$(grep 'bookSeries' "$searchInfo" | awk -F'[()]' '{ print $2 }')
   fi
 
   if [[ -n $fullSeries ]]; then
+    if grep -q ', #' <<< "$fullSeries"; then
+      sep=1
+    elif grep -q ' #' <<< "$fullSeries"; then
+      sep=2
+    elif grep -q ' Book ' <<< "$fullSeries"; then
+      sep=3
+    else
+      sep=4
+    fi
+
     case $sep in
-      1) bookSeries=$(awk -F', #' '{ print $1 }' <<< "$fullSeries")
-         seriesNum=$(awk -F', #' '{ print $2 }' <<< "$fullSeries")
+      1) _bookSeries=$(awk -F', #' '{ print $1 }' <<< "$fullSeries")
+         _seriesNum=$(awk -F', #' '{ print $2 }' <<< "$fullSeries")
          ;;
-      2) bookSeries=$(awk -F' Book ' '{ print $1 }' <<< "$fullSeries")
-         seriesNum=$(awk -F' Book ' '{ print $2 }' <<< "$fullSeries")
+      2) _bookSeries=$(awk -F' #' '{ print $1 }' <<< "$fullSeries")
+         _seriesNum=$(awk -F' #' '{ print $2 }' <<< "$fullSeries")
          ;;
-      3) bookSeries=$fullSeries
+      3) _bookSeries=$(awk -F' Book ' '{ print $1 }' <<< "$fullSeries")
+         _seriesNum=$(awk -F' Book ' '{ print $2 }' <<< "$fullSeries")
          ;;
-      *) bookSeries="Unknown"
+      4) _bookSeries=$fullSeries
+         ;;
+      *) _bookSeries="Unknown"
          ;;
      esac
 
-    majNum=$(awk -F'.' '{ printf("%02d", $1) }' <<< "$seriesNum")
-    minNum=$(awk -F'.' '{ print $2 }' <<< "$seriesNum")
+    majNum=$(awk -F'.' '{ printf("%02d", $1) }' <<< "$_seriesNum")
+    minNum=$(awk -F'.' '{ print $2 }' <<< "$_seriesNum")
 
     if [[ $majNum == '00' ]]; then
-      unset seriesNum
+      unset _seriesNum
     elif [[ -n $minNum ]]; then
-      seriesNum="${majNum}.${minNum}"
+      _seriesNum="${majNum}.${minNum}"
     else
-      seriesNum="$majNum"
+      _seriesNum="$majNum"
     fi
 
-    if [[ -n $seriesNum ]]; then
-      bookSeries="$bookSeries $seriesNum"
+    if [[ -n $_seriesNum ]]; then
+      _bookSeries="$_bookSeries $_seriesNum"
     fi
 
   else
-    bookSeries=$bookYear
+    _bookSeries=${bookYear[$index]:-unknwn}
   fi
 
-  bookRating=$(grep 'ratingValue' "$searchInfo" | sed -rn 's/.*([0-9]\.[0-9]{2}).*/\1/p')
+  _bookSeries=${_bookSeries//:/-}
+  _bookSeries=${_bookSeries//[^a-zA-Z0-9 -]/}
+  bookSeries[$index]=$_bookSeries
+
+  bookRating[$index]=$(grep 'ratingValue' "$searchInfo" | sed -rn 's/.*([0-9]\.[0-9]{2}).*/\1/p')
 
   image1=$(grep 'id=coverImage' "$searchInfo" | sed -n 's/.*src="\(.*\)">.*/\1/p')
   image2=$(grep -m 1 -i 'editioncover' "$searchInfo" | sed -n 's/.*src="\(.*\)">.*/\1/p')
-  imageSource=${image1:-$image2}
+  imageSource[$index]=${image1:-$image2}
 
-  baseName="$bookAuthor - $bookSeries - $bookTitle"
-  bookInfo="$workDir/${baseName}.info"
-  bookLink="$workDir/${baseName}.url"
-  bookCover="$workDir/${baseName}.jpg"
-
-  if [[ -n $imageSource ]]; then
-    curl -s -o "$bookCover" "$imageSource" 
+  if $verify; then
+    echo -e "${C4}Enter book author:${C0} ${bookAuthor[$index]}"
+    read -r _bookAuthor
+    bookAuthor[$index]=${_bookAuthor:-${bookAuthor[$index]}}
+    echo -e "${C4}Enter book series:${C0} ${bookSeries[$index]}"
+    read -r _bookSeries
+    bookSeries[$index]=${_bookSeries:-${bookSeries[$index]}}
+    echo -e "${C4}Enter book title:${C0} ${bookTitle[$index]}"
+    read -r _bookTitle
+    bookTitle[$index]=${_bookTitle:-${bookTitle[$index]}}
   fi
 
-  cat <<EOF >"$bookLink"
+  baseName[$index]="${bookAuthor[$index]} - ${bookSeries[$index]} - ${bookTitle[$index]}"
+  bookInfo[$index]="$workDir/${baseName[$index]}.info"
+  bookLink[$index]="$workDir/${baseName[$index]}.url"
+  bookCover[$index]="$workDir/${baseName[$index]}.jpg"
+
+  if [[ -n ${imageSource[$index]} ]]; then
+    curl -s -o "${bookCover[$index]}" "${imageSource[$index]}" 
+  fi
+
+  cat <<EOF >"${bookLink[$index]}"
 [{000214A0-0000-0000-C000-000000000046}]
 Prop3=19,2
 [InternetShortcut]
 IDList=
-URL=$bookURL
+URL=${bookURL[$index]}
 EOF
 
-  cat << EOF >> "$bookInfo"
-Author:   $bookAuthor
-Title:    $bookTitle
-ISBN:     $bookISBN
-Series:   $bookSeries
-Year:     $bookYear
-Rating:   $bookRating
-Bitrate:  $bookBitrate kb/s
-URL:      $bookURL
-Image:    $imageSource
+summary1=$(sed -rn '/descriptionContainer/,/\/div/p' "$searchInfo" | grep -v ' <' |\
+  sed -rn 's/ +(.*)<.*/\1/p' | fold -s)
+summary2=$(sed -rn '/descriptionContainer/,/\/div/p' "$searchInfo" | sed 's/<br>//g' |\
+  sed -rn 's/^ +([A-Z].*)<.*$/\1/p' | sed 's/<.*//' | fold -s)
+summary=${summary1:-$summary2}
+
+  cat << EOF >> "${bookInfo[$index]}"
+   Author: ${bookAuthor[$index]}
+    Title: ${bookTitle[$index]}
+     ISBN: ${bookISBN[$index]}
+   Series: ${bookSeries[$index]}
+     Year: ${bookYear[$index]}
+Publisher: ${bookPublisher[$index]}
+   Rating: ${bookRating[$index]}
+  Bitrate: ${bookBitrate[$index]} kb/s
+      URL: ${bookURL[$index]}
+    Cover: ${imageSource[$index]}
 
 
 Classifications:
@@ -444,69 +491,181 @@ $(grep 'people shelved this book' "$searchInfo" | sed -n 's/&#39;//g; s/.*title=
 
 
 Summary:
-  $(sed -n '/descriptionContainer/,/^$/p' "$searchInfo" | tail -n +6 | grep -v '^ *<' | sed 's/<.*.//g; s/^ *//g' | fold -w 80 -s)
+  $summary
 EOF
 
   # Replace extended characters with apostrophe
   # echo "X" | od -t x1c  # Display hex codes
-  sed -i 's/\xE2\x80\x9C/"/g; s/\xE2\x80\x9D/"/g; s/\xC3\x82//g; s/\xC5\x93/"/g; s/\xC2\x9D/"/g' "$bookInfo"
+  sed -i 's/\xE2\x80\x9C/"/g; s/\xE2\x80\x9D/"/g; s/\xC3\x82//g; s/\xC5\x93/"/g; s/\xC2\x9D/"/g' "${bookInfo[$index]}" 
+
+  # Check converted.log for already converted.
+  if grep -q "${baseName[$index]}" "$convertLog"; then
+    echo -e "${C4}SKIPPING:${C0} ${baseName[$index]} already converted."
+    return 1
+  else
+    cat << EOF
+  ${C0}bookAuthor: ${C7}${bookAuthor[$index]:0:80}${C0}
+  ${C0}bookTitle: ${C7}${bookTitle[$index]:0:80}${C0}
+  ${C0}bookSeries: ${C7}${bookSeries[$index]:0:80}${C0}
+  ${C0}bookYear: ${C7}${bookYear[$index]}${C0}
+  ${C0}bookRating: ${C7}${bookRating[$index]}${C0}
+  ${C0}bookCover: ${C7}${imageSource[$index]}${C0}
+EOF
+  fi
+
+  ## Confirm unrated books
+  if [[ ${bookRating[$index]} == '0.00' ]]; then
+    echo -e "${C4}WARNING:${C0} This book has a '0.00' rating, continue? [y/N]:\c"
+    read -rn 1 ANS
+    echo ""
+    if [[ ${ANS,,} != 'y' ]]; then
+      return 1
+    fi
+  fi
 
   return 0
 }
 
-promptTags()
+classifyIt()
 {
   inFile=$1
+  index=$2
 
-  ## Manually set ID3 tags
-  echo -e "${C3}No ID3 tags found in $inFile${C0}"
-  tempTitle=$bookTitle
-  echo -e "${C3}  Please enter a title for this book [${C4}${tempTitle}${C3}]${C0}: \c"
-  read -r bookTitle
-  bookTitle=${bookTitle:-$tempTitle}
+  echo -e "${C8}>>> Checking book catagory...${C0}"
+  while [[ -z $catagory ]]; do
 
-  tempAuthor=$bookAuthor
-  echo -e "${C3}  Please enter an author for this book [${C4}${tempAuthor}${C3}]${C0}: \c"
-  read -r bookAuthor
-  bookAuthor=${bookAuthor:-$tempAuthor}
+    echo ""
+    cat "${bookInfo[$index]}"
+    echo ""
 
-  fullName="$bookAuthor - $bookSeries - $bookTitle"
-  echo -e " INFO: bookTitle = ${C3}$bookTitle${C0}"
-  echo -e " INFO: bookAuthor = ${C3}$bookAuthor${C0}"
-  echo -e " INFO: fullName = ${C3}$fullName${C0}"
+    cat << EOM
+${C4}1) Romance
+2) Erotica
+3) Sci-Fi
+4) Fantasy
+5) Thriller
+6) Misc${C0}
 
-  return 0
+EOM
+
+    echo -e "${C4}Select book catagroy number: ${C0}\c"
+    read -rn 1 catagory
+    if (( ! catagory >= 1 && ! catagory < 7 )); then
+      unset catagory
+    fi
+
+  echo ""
+  done
+  
+  case $catagory in
+    1) # Romance
+      bookType="Romance"
+      ;;
+    2) # Erotica
+      bookType="Erotica"
+      ;;
+    3) # SciFi
+      bookType="SciFi"
+      ;;
+    4) # Fantasy
+      bookType="Fantasy"
+      ;;
+    5) # Thriller
+      bookType="Thriller"
+      ;;
+    6) # Misc
+      bookType="Misc"
+      ;;
+    *) # Unknown
+      echo -e "\nUnknown catagory type [$catagory]"
+      return 1
+      ;;
+  esac
+
+  if [[ -n $bookType ]]; then
+    echo -e "${C8}  bookCategory: $bookType ${C0}"
+    return 0
+  else
+    cleanUp 20
+  fi
+
+  echo -e "${C8}>>> bookType: $bookType ${C0}"
 }
 
 checkFile()
 {
-  ## This function will convert non-mp3 files to mp3 and concatenate if set.
-  catFile="${workDir}/ccab_concat.mp3"
-  i=0
+  inFile=$1
+  index=$2
+  extension="${inFile##*.}"
+  outFile="$workDir/$(basename "${inFile%.*}").mp3"
 
-  while [[ $i -lt ${#inFiles[*]} ]]; do
-    extension=${inFiles[$i]##*.}
-    inFile=${inFiles[$i]}
-    outFile="$workDir/${inFiles[$i]%.*}.mp3"
-
-    if [[ ${extension,,} != 'mp3' && ! -s "$outFile" ]]; then
-      ffmpeg -hide_banner -loglevel error -stats -i "$inFile" -vn -sn "$outFile"
-      ## Reset inFile to converted file
-      inFiles[$i]=$outFile
+  # Check converted.log for already converted.
+  if [[ -n "${baseName[$index]}" ]]; then
+    if grep -q "${baseName[$index]}" "$convertLog"; then
+      return 1
     fi
-    ((i++))
-  done
-  
-  if [[ $concat == 'true' ]]; then
-    i=0
-    find "$workDir" -name "ccab_concat*" -delete
-    while [[ $i -lt ${#inFiles[*]} ]]; do
-      echo "${C8}> Adding ${C7}${inFiles[$i]}${C0}"
-      cat "${inFiles[$i]}" >> "$catFile"
-      ((i++))
-    done
-    inFiles[0]="$catFile"
   fi
+
+  if [[ ! ${extension,,} =~ (mp3|mp4) ]]; then
+    echo -e "${C8}>>> Converting $(basename "$inFile")...${C2}"
+    ffmpeg -hide_banner -loglevel error -stats -i "$inFile" -vn -sn "$outFile"
+    ## Reset inFiles to new converted file
+    inFiles[$index]="$outFile"
+    echo -e "${C8}Done converting file to mp3${C0}\n"
+  fi
+
+  if $concat; then
+    echo -e "${C8}>>> Adding $inFile${C0}"
+    cat "$inFile" >> "$catFile"
+    return 2
+  fi
+
+  return 0
+}
+
+reEncode()
+{
+  inFile=$1
+  index=$2
+  outFile="$workDir/${baseName[$index]}.abr${bookBitrate[$index]}.mp3"
+  encodeFile[$index]="$outFile"
+
+  echo -e "${C0}>>> Encoding ${baseName[$index]}...${C2}"
+
+  checkFile=0
+  while [[ $checkFile -lt 1 ]]; do
+
+    # Re-encode input file with my parameters.
+    lame --nohist -m m -V 6 "$inFile" "$outFile"
+  
+    outSize=$(/bin/ls -l "$outFile" | awk '{ print $5 }')
+ 
+    ## This is for files that don't concatenate properly 
+    if [[ $outSize -lt '4096000' ]]; then
+      tempOut="$workDir/concat_44k.mp3"
+      echo -e "${C8}>>> Re-encoding due to size error${C0}"
+      ffmpeg -hide_banner -loglevel quiet -stats -i "$inFile" -codec:a libmp3lame -ar 44.1k "$tempOut"
+      mv "$tempOut" "$outFile"
+      checkFile=1
+    else
+      checkFile=1
+    fi
+
+  done
+
+  echo -e "${C8}lame encoding completed${C0}"
+
+  cat <<EOF >>done.txt
+workDir:    $workDir
+bookAuthor: ${bookAuthor[$index]}
+bookTitle:  ${bookTitle[$index]}
+bookSeries: ${bookSeries[$index]}
+authorDir:  $baseDir/$bookType/${bookAuthorReverse[$index]}
+bookDir:    ${bookSeries[$index]} - ${bookTitle[$index]}
+
+EOF
+
+  return 0
 }
 
 tagIt()
@@ -514,212 +673,231 @@ tagIt()
   # Attempted to use several command line tag editors, mid3v2 does most of what I needed, but has some 
   # issues with cover art....
   inFile=$1
-  shortName=$(basename "$inFile")
-
-  echo -e "${C8}> Removing original ID3 tags on: ${C7}$shortName${C0}"
+  index=$2
+  
+  echo -e "${C8}>>> Removing original ID3 tags${C0}"
   mid3v2 --delete-all "$inFile" >/dev/null 2>&1
-  if [[ -s "$bookCover" ]]; then
-    echo -e "${C8}> Adding book cover image to: ${C7}$shortName${C0}"
+
+  if [[ -s "${bookCover[$index]}" ]]; then
+    echo -e "${C8}>>> Adding book cover image${C0}"
     # Falling back to fancy_audio for cover art :/.
-    fancy_audio "$inFile" "$bookCover"
+    fancy_audio "$inFile" "${bookCover[$index]}"
   fi
-  echo -e "${C8}> Adding ID3 tags to: ${C7}$shortName${C0}"
+
+  echo -e "${C8}>>> Adding ID3 tags${C0}"
   #shellcheck disable=SC2140
-  mid3v2 -a "$bookAuthor" -A "$bookSeries" -t "$bookTitle" -g 'audiobook' -T 1 -c "Comment":"$bookURL":"eng" \
-    -c "Rating":"$bookRating":"eng" -c "Encoded by":"theGh0st":"eng" "$inFile" > /dev/null
+  mid3v2 -a "${bookAuthor[$index]}" \
+    -A "${bookSeries[$index]}" \
+    -t "${bookTitle[$index]}" \
+    -g 'audiobook' -T 1 \
+    -c "Comment":"${bookURL[$index]}":"eng" \
+    -c "Rating":"${bookRating[$index]}":"eng" \
+    -c "Encoded by":"theGh0st":"eng" "$inFile" > /dev/null
 
   return 0
 }
 
-reEncode()
-{
-  i=0
-    inFile=$1
-    outFile="$workDir/${baseName}.abr${bookBitrate}.mp3"
-
-    # Check converted.log for already converted.
-    if grep -q "$baseName" "$convertLog"; then
-      echo -e "${C4}WARNING: ${C3}$inFile${C0} has already been converted."
-      #return 1
-    fi
-
-    # Re-encode input file with my parameters.
-    if [[ ! -s "$outFile" ]]; then
-      echo -e "${C2}"
-      lame --nohist -m m -V 6 "$inFile" "$outFile"
-      STATUS=$?
-      echo -e "${C0}"
-    else
-      # File previously encoded.
-      echo -e "${C4}WARNING: ${C3}$inFile${C0} already encoded."
-      STATUS=2
-      return $STATUS
-    fi
-  
-    if [[ $STATUS -gt 0 ]]; then
-      echo -e "${C5}ERROR:${C3}$STATUS${C0} During lame encoding."
-      return $STATUS
-    else
-      echo -e "${C1}OK:${C0} lame encoding successful."
-      echo "$outFile" >> done.txt
-      return 0
-    fi
-}
-
 moveIt()
 {
+  inFile=$1
+  index=$2
+  aDir="$baseDir/$bookType/${bookAuthorReverse[$index]}"
+  outDir[$index]="$aDir/${bookSeries[$index]} - ${bookTitle[$index]}"
+  echo -e "${C8}>>> bookType=$bookType${C0}"
+  echo -e "${C8}>>> outDir[$index]=${outDir[$index]}${C0}"
 
-  # Check if book catagory specified in arguments.
-  if [[ -n $catagory ]]; then
-    REPLY=$catagory
-    case $REPLY in
-      1) # Romance
-        bookType="Romance"
-        ;;
-      2) # Erotica
-        bookType="Erotica"
-        ;;
-      3) # SciFi
-        bookType="SciFi"
-        ;;
-      4) # Fantasy
-        bookType="Fantasy"
-        ;;
-      5) # Thriller
-        bookType="Thriller"
-        ;;
-      6) # Misc
-        bookType="Misc"
-        ;;
-      *) # Unknown
-        echo -e "\nUnknown catagory type [$catagory]"
-        unset catagory
-        ;;
-    esac
+  if ! $move; then
+    echo -e "${C4}WARNING:${C8} Move flag not set."
+    clean='false'
+  else
+    echo -e "${C8}>>> Moving encoded files to .../${bookAuthorReverse[$index]}/${bookTitle[$index]}${C0}"
   fi
 
-  # Prompt for book catagory if not specified.
-  PS3="Select book type: "
-  while [[ -z $catagory ]]; do
-    echo -e "\n${C4}Available book types${C0}\n"
-    # zzshellcheck disable=2034
-    select bookType in Romance Erotica SciFi Fantasy Thriller Misc Quit
-    do
-      case $REPLY in
-        1) # Romance
-          #bookType="Romance"
-          Check=1
-          break
-          ;;
-        2) # Erotica
-          #bookType="Erotica"
-          Check=1
-          break
-          ;;
-        3) # SciFi
-          #bookType="SciFi"
-          Check=1
-          break
-          ;;
-        4) # Fantasy
-          #bookType="Fantasy"
-          Check=1
-          break
-          ;;
-        5) # Thriller
-          #bookType="Thriller"
-          Check=1
-          break
-          ;;
-        6) # Misc
-          #bookType="Misc"
-          Check=1
-          break
-          ;;
-        7) # Quit
-          echo -e "\nBailing now!"
-          Check=1
-          exit 5
-          ;;
-        *) # Unknown
-          echo -e "\nUnknown option [${REPLY}]"
-          Check=0
-          break
-          ;;
-      esac
-    done
-    if [[ $Check -eq 1 ]]; then
-      break
-    fi
-  done
-
-  outDir="$baseDir/$bookType/$bookAuthorReverse/$bookSeries - $bookTitle"
-
-  if [[ ! -d "$outDir" ]]; then
-    mkdir -p "$outDir"
+  if $debug; then
+    echo -e "${C2}++outDir[$index]=${outDir[$index]}${C0}"
   fi
 
-  shortName=$(basename "$inFile")
-  echo -e "\n${C8}> Moving ${C7}$shortName${C8} to ${C7}$outDir${C0}"
-  mv "$outFile" "$outDir"
+  if [[ -d "${outDir[$index]}" ]]; then
+    sudo mv "${outDir[$index]}"{,.old}
+    sudo chown ${user}:${group} "${outDir[$index]}.old"
+    sudo mkdir -p "${outDir[$index]}"
+  else
+    sudo mkdir -p "${outDir[$index]}"
+  fi
+
+  { sudo mv "${bookInfo[$index]}" "${outDir[$index]}";
+    sudo mv "${bookCover[$index]}" "${outDir[$index]}";
+    sudo mv "${bookLink[$index]}" "${outDir[$index]}";
+    sudo mv "${encodeFile[$index]}" "${outDir[$index]}"; }
   STATUS=$?
-  mv "$bookInfo" "$outDir"
-  mv "$bookCover" "$outDir"
-  mv "$bookLink" "$outDir"
 
   if [[ $STATUS -eq 0 ]]; then
-    chown -R $user:$group "$baseDir/$bookType/$bookAuthorReverse"
-    find "$baseDir/$bookType/$bookAuthorReverse" -type d -exec chmod 775 {} \;
-    find "$baseDir/$bookType/$bookAuthorReverse" -type f -exec chmod 664 {} \;
-  
-    mDate=$(date +%Y-%b-%d)
-    mDate=${mDate^^}
-    
-    echo "$mDate, [$bookType], $(basename "$outFile")" >> $convertLog
-    return 0
+    echo -e "${C8}Files moved successfully${C0}"
   else
-    echo -e "${C5}ERROR:${C0} Moving files to $outDir"
+    echo -e "${C5}ERROR:${C0} moving files.${C0}"
     return $STATUS
   fi
+
+  echo -e "${C8}>>> Setting file/directory permissions${C0}"
+  sudo chown -R $user:$group "$aDir"
+  sudo chmod 775 "$aDir"
+  find "$aDir" -type d -exec sudo chmod 775 "{}" \;
+  find "$aDir" -type f -exec sudo chmod 664 "{}" \;
+  
+  mDate=$(date +%Y-%b-%d)
+  mDate=${mDate^^}
+  
+  echo -e "${C8}>>> Updating convert log${C0}"  
+  echo "$mDate, [$bookType], ${baseName[$index]}" >> $convertLog
+
+  notify-send "Audiobook encode completed:" "${bookAuthor[$index]} - ${bookTitle[$index]}"
+  return 0
 }
 
-# -----------------------------------------------
-# MAIN
-# -----------------------------------------------
-echo -e " MAIN: $0 options = ${C3}$options${C0}"
-rm -f "${workDir:?}"/*
-echo -e " MAIN: calling ${C6}getFiles()${C0}"
+## Process command line arguments
+## -------------------------------------
+while [[ $# -gt 0 ]]; do
+  key="$1"
+  case $key in
+    -b | --bitrate) # Set bitrate for output
+      re='^[0-9]+$'
+      if [[ $2 =~ $re ]]; then
+        targetBitrate=$2
+        shift 2
+      else
+        targetBitrate=48
+        shift
+      fi
+      ;;
+    -c | --concat) # Concat all files found
+      concat='true'
+      shift
+      ;;
+    -d | --debug) # Enable debug output
+      debug='true'
+      shift
+      ;;
+    -h | --help) # Display help message
+      usage
+      exit 0
+      ;;
+    -m | --move) # Copy results to output directory
+      move='true'
+      catagory=$2
+      re='^[1-6]$'
+      if [[ ! $catagory =~ $re ]]; then
+        unset catagory
+        shift
+      else
+        shift 2
+      fi
+      ;;
+    --mp3) # Search for only mp3 files
+      searchType=".*\.\(mp3\)$"
+      shift
+      ;;
+    --m4b) # Search for only .m4a or .m4b files
+      searchType=".*\.\(m4a\|m4b\)$"
+      shift
+      ;;
+    --flac) # Search for only .flac files
+      searchType=".*\.\(flac\)$"
+      shift
+      ;;
+    -r | --recurse) # Search subdirectories for files
+      recurse=true
+      shift
+      ;;
+    -v | --verify) # Verify ID3 tags
+      verify=true
+      shift
+      ;;
+    *) # Unknown option
+      usage
+      echo -e "${C5}[RC:1] ${C0}Unknown option ${C4}$1${C0}"
+      exit 1
+      ;;
+  esac
+done
+
+
+## MAIN
+## -------------------------------------
 getFiles
+## First loop to collect book information
+j=0
+while (( j < ${#inFiles[*]} )); do
 
-probeFile "${inFiles[0]}"
-CHECK=$?
+  if $debug; then
+    echo -e "${C2}+First loop, Processing '${inFiles[$j]}'${C0}"
+  fi
 
-if [[ $CHECK -gt 0 ]]; then
-  promptTags "${inFiles[0]}"
+  probeFile "${inFiles[$j]}" $j
+  searchInfo "${inFiles[$j]}" $j
+  parseInfo "${inFiles[$j]}" $j
+  STATUS=$?
+
+  if [[ $STATUS -eq 0 && $move ]]; then
+   classifyIt "${inFiles[$j]}" $j
+  fi
+
+  ## Break if concatenating files
+  if $concat; then
+    catFile="$workDir/${baseName[0]}.concat.mp3"
+    break;
+  fi
+
+  ((j++))
+
+done
+
+if $debug; then
+  echo -e "${C2}+End first loop.${C0}"
 fi
 
-searchInfo "${bookTitle} ${bookAuthor}"
 
-parseInfo
+## Second loop to re-encode non-concatenated files
+j=0
+while (( j < ${#inFiles[*]} )); do
 
-echo ""
-cat "$bookInfo"
-echo ""
+  if $debug; then
+    echo -e "${C2}+Second loop, Processing '${inFiles[$j]}'${C0}"
+  fi
 
-checkFile
+  checkFile "${inFiles[$j]}" $j
+  STATUS=$?
 
-reEncode "${inFiles[0]}"
-CHECK=$?
+  if $debug; then
+    echo -e "${C2}+checkFile STATUS=$STATUS\n++inFiles[$j]=${inFiles[$j]}${C0}"
+  fi
 
-if [[ $CHECK -gt 0 ]]; then
-  echo "Error during reEncode, bailing."
-  exit $CHECK
-fi
+  if (( STATUS == 0 )); then
+    reEncode "${inFiles[$j]}" $j
+    tagIt "${encodeFile[$j]}" $j
+    moveIt "${baseName[$j]}" $j
+    CHECK=$?
+  fi
 
-tagIt "$outFile"
+  ((j++))
 
-if [[ $move == 'true' ]]; then
-  moveIt
+done
+
+## Process concatenated files
+if $concat; then
+
+  if $debug; then
+    echo -e "${C2}+Process concat file '$catFile'${C0}"
+  fi
+
+  reEncode "$catFile" 0
+  tagIt "${encodeFile[0]}" 0
+  moveIt "${baseName[0]}" 0
   CHECK=$?
+fi
+
+if (( CHECK == 0 )); then
+  cleanUp 0
+else
+  cleanUp 5
 fi
 
