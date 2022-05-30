@@ -265,7 +265,7 @@ searchIt()
 
   i=0
   while (( i < ${#tmpTitle[*]} )); do
-    echo -e "${C4}$((i + 1)). ${C3}${tmpTitle[$i]}${C0}"
+    echo -e "${C4}$((i + 1)). ${C3}${tmpTitle[$i]/&amp;/&/}${C0}"
     echo -e "   ${C8}${tmpURLs[$i]}${C0}"
     echo ""
     ((i++))
