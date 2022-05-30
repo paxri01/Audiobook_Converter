@@ -60,8 +60,12 @@ while [[ $i -lt ${#outFile[*]} ]]; do
   #  aOpts="loudnorm=I=-16:TP=-1.5:LRA=11:measured_I=$input_i:measured_tp=$input_tp:measured_LRA=$input_lra:measured_thresh=$input_thresh"
   #  rm .sample.json
 
+# Use the following to normalize audio file.
+#  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" -sn -c:v copy \
+#    -af loudnorm=I=-10:LRA=11:TP=-.2  "$album/${outFile[$i]}"
   #shellcheck disable=SC2086,SC2090
-  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" -sn -c:v copy -af loudnorm=I=-16:LRA=11:TP=-1  "$album/${outFile[$i]}"
+  ffmpeg -hide_banner -loglevel quiet -stats -y -i "${inFile[$i]}" -sn -c:v copy \
+    -c:a copy "$album/${outFile[$i]}"
   #STATUS=$?
   echo -e "\n< inFile: ${inFile[$i]}"
   mediainfo "${inFile[$i]}" | sed -n '/^Audio/,/^Writing/p'
