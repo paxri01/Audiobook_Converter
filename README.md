@@ -30,7 +30,6 @@ ccab.sh [-c ||--concat] [-m ||--move] [-mo] [-mp3] [-m4b] [-r] [-v]
                        /disk 1 ==> /disk 01).
    -u || --update    : Only update book information (title, info, etc.) for an
                        already converted book (eg. change series info, title).
-   -v || --verify    : Will prompt for verification of detected book information.
    -x || --remove    : Remove source files after conversion (DANGEROUS!).
 ```
 
@@ -49,6 +48,11 @@ The following packages are require to use this script.
 directories and log locations.
 
 ## CHANGES
+
+### CHG0002 - 2023.01.31
+* Rework GR parser logic to latest results.
+* Auto prompt for input on key missing fields (title, author, series, etc.)
+* Code cleanup.
 
 ### CHG0001 - 2018.05.15
 

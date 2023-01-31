@@ -54,11 +54,6 @@ command -v fancy_audio >/dev/null || {
   echo "${C5}[RC:12] ERROR, ${C3}fancy_audio${C0} not found in \$PATH, Install: ${C1}sudo gem install fancy_audio${C0}";
   exit 12;
 }
-# Dead project :(
-#command -v googler >/dev/null || {
-#  echo "${C5}[RC:13] ERROR, ${C3}googler${C0} not found in \$PATH, Install: ${C1}sudo dnf install googler${C0}";
-#  exit 13;
-#}
 command -v curl >/dev/null || {
   echo "${C5}[RC:14] ERROR, ${C3}curl${C0} not found in \$PATH, Install: ${C1}sudo dnf install curl${C0}";
   exit 14;
@@ -78,7 +73,7 @@ concat=false
 debug=false
 move=false
 recurse=false
-verify=false
+#verify=false
 
 cleanUp()
 {
@@ -104,7 +99,7 @@ cleanUp()
     tput cnorm
     echo -e "${C5}[RC:$STATUS] Error during run, aborting.${C0} [$workDir]"
   fi
-  
+
   exit "$STATUS"
 }
 
@@ -156,7 +151,7 @@ getFiles()
   fileList="$workDir/concat_files.list"
   searchType=${searchType:-'.*\.\(mp3\|m4a\|m4b\|flac\|mp4\)'}
   inDir=${inDir:-$PWD}
-  
+
   if [[ $recurse == 'true' ]]; then
     find "$inDir" -type f -iregex ".*.${searchType}" -printf '%h/%f\n' |\
       grep -v 'ccab' | sort -V > "$fileList"
@@ -164,7 +159,7 @@ getFiles()
     find "$inDir" -maxdepth 1 -type f -iregex ".*.${searchType}" -printf '%h/%f\n' |\
       grep -v 'ccab' | sort -V > "$fileList"
   fi
-  
+
   mapfile -t inFiles < <(cat "$fileList")
 
   return 0
@@ -215,7 +210,7 @@ probeFile()
   fi
 
   #set +x
- 
+
   _origBitrate=$(grep 'Audio:' "$probeFile" | awk -F', ' '{ print $5 }' | awk '{ print $1 }')
   if [[ $_origBitrate -gt $targetBitrate ]]; then
     _bookBitrate=$targetBitrate
@@ -280,7 +275,7 @@ searchInfo()
   index=$2
   searchInfo="$workDir/$(basename "${inFile%.*}").html"
   searchRaw="$workDir/$(basename "${inFile%.*}").raw"
-  
+
   searchData="${bookTitle[$index]}+${bookAuthor[$index]}"
   searchData=${searchData//([Uu]nabridged)/}
 
@@ -324,7 +319,7 @@ searchInfo()
       echo -e "${C2}++curl -sL \"${bookURL[$index]}\" -o \"$searchRaw\"${C0}"
     fi
     curl -sL "${bookURL[$index]}" -o "$searchRaw"
-    sleep 2
+    sleep .5
   done
 
   ## Attempt to normalize html results
@@ -342,140 +337,186 @@ parseInfo()
   inFile=$1
   index=$2
   searchInfo="$workDir/$(basename "${inFile%.*}").html"
+  header="$workDir/$(basename "${inFile%.*}").header"
+  props="$workDir/$(basename "${inFile%.*}").props"
+  unset _fullTitle
+  grep -i 'author' "$searchInfo" | grep '<script' | sed 's/\",\"/\n/g' | tr -d '"' > "$header"
+  grep '"props":' "$searchInfo" | sed 's/\",\"/\n/g' | tr -d '"' > "$props"
   echo -e "${C8}>>> Parsing information...${C0}"
 
-  ## Scrape results for book information.
-  title1=$(grep -m 1 '<title>' "$searchInfo" | hxselect -ic title | awk -F' by ' '{ print $1 }')
-  title2=$(grep 'property=.og:title' "$searchInfo" | sed -rn 's/.*content=(.*) property.*/\1/p')
-  fullTitle=${title1:-$title2}
-  fullTitle=${fullTitle/&amp;/&}
-  if $debug; then
-    echo -e "${C2}++fullTitle=$fullTitle${C0}"
+  # METHOD #1
+  if grep -q 'image:' "$header"; then
+    echo -e "${C2}parse method #1${C0}"
+    _fullTitle=$(grep -m1 'name:' "$header" | awk -F: '{ print $2}')
+    _author=$(grep -A1 -m1 'author' "$header" | grep -v 'author' | awk -F: '{ print $2 }')
+    _title=$(sed -rn 's/^(.[^\(]+) .*/\1/p' <<< "$_fullTitle")
+    _series=$(sed -rn 's/^.*\((.*)\)/\1/p' <<< "$_fullTitle")
+    _image=$(grep -m1 'image:' "$header" | sed 's/image://')
+    _rating=$(grep rating "$header" | tr ',' '\n' | grep 'ratingValue:' | awk -F: '{ print $2 }')
   fi
-  _bookTitle=$(sed -n 's/\(.*\) (.*)/\1/p' <<< "$fullTitle")
-  _bookTitle=${_bookTitle:-$title1}
-  _bookTitle=${_bookTitle/&amp;/&}
-  _bookTitle=${_bookTitle//:/-}
-  _bookTitle=${_bookTitle//é/e}
-  _bookTitle=${_bookTitle//[^a-zA-Z0-9 -&]/}
-  bookTitle[$index]="$_bookTitle"
 
-  author=$(grep -m 1 '<title>' "$searchInfo" | hxselect -ic title | awk -F' by ' '{ print $2 }')
-  _bookAuthor=${author:-$_bookAuthor}
-    _bookAuthor=${_bookAuthor/É/E}
-    _bookAuthor=${_bookAuthor//[^a-zA-Z0-9 -.]/}
+  # METHOD #2
+  if [[ -z $_fullTitle ]]; then
+    echo -e "${C2}parse method #2${C0}"
+    _fullTitle=$(grep -i 'property="og:title"' "$searchInfo" | awk -F'[""]' '{ print $2 }')
+    _author=$(grep -m1 '<title>' "$searchInfo" | awk -F' by ' '{ print $2 }' |\
+      sed -rn 's/^(.*) \|.*/\1/p')
+    _title=$(sed -rn 's/^(.[^\(]+) .*/\1/p' <<< "$_fullTitle")
+    _series=$(sed -rn 's/^.*\((.*)\)/\1/p' <<< "$_fullTitle")
+    _image=$(grep '"props":' "$searchInfo" | tr ',' '\n' | grep 'imageUrl' | tr -d '"' |\
+      sed 's/imageUrl://')
+    _rating=$(grep '"props":' "$searchInfo" | tr ',' '\n' | grep 'averageRating' |\
+      awk -F: '{ print $2 }')
+  fi
+
+  # METHOD #3
+  if [[ -z $_fullTitle ]]; then
+    echo -e "${C2}parse method #3${C0}"
+    _fullTitle=$(grep 'titleComplete:' "$props" | sed 's/titleComplete://')
+    _author=$(grep -A1 -m1 ':Contributor' "$props" | grep '\bname:' | sed -rn 's/.*:(.*)/\1/p')
+    _title=$(sed -rn 's/^(.[^\(]+) .*/\1/p' <<< "$_fullTitle")
+    _series=$(sed -rn 's/^.*\((.*)\)/\1/p' <<< "$_fullTitle")
+    _image=$(grep 'imageUrl:' "$props" | sed -rn 's/.*(https:.*)/\1/p')
+    _rating=$(grep 'averageRating:' "$props" | sed -rn 's/averageRating:(.[^,]*),.*/\1/p')
+  fi
+
+  ## Sanitize book title
+  _title=${_title/&amp;/&}
+  _title=${_title/&#x27;/\'}
+  _title=${_title//:/-}
+  _title=${_title//é/e}
+  _title=${_title//[^a-zA-Z0-9 -&]/}
+  bookTitle[$index]="$_title"
+
+  # I give up!
+  if [[ -z ${bookTitle[$index]} ]]; then
+    echo -e "${C4}Enter book title:${C0}: \c"
+    read -r _bookTitle
+    bookTitle[$index]=$_bookTitle
+  fi
+
+  # Sanitize book author
+  _author=${_author/É/E}
+  _author=${_author//[^a-zA-Z0-9 -.]/}
+
+  # I give up!
+  if [[ -z $_author ]]; then
+    echo -e "${C4}Enter book author:${C0}: \c"
+    read -r _author
+  fi
   ## Reverse author name and strip any ending '.'
-  _bookAuthorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$_bookAuthor" | sed 's/\.$//')
-  bookAuthor[$index]="$_bookAuthor"
-  bookAuthorReverse[$index]="${_bookAuthorReverse:-$_bookAuthor}"
+  _authorReverse=$(awk '{$1=$NF", "$1;NF--} 1' <<< "$_author" | sed 's/\.$//')
+  bookAuthor[$index]="$_author"
+  # For one work authors
+  bookAuthorReverse[$index]="${_authorReverse:-$_author}"
 
+  #TODO: Move to above methods
   #bookISBN[$index]=$(grep -m 1 'itemprop=isbn' "$searchInfo" | hxselect -ic div | awk '{ print $1 }')
-  bookISBN[$index]=$(grep 'books:isbn' "$searchInfo" | sed -rn 's/.*tent=(.*) prop.*/\1/p')
+  _isbn1=$(grep -m 1 'isbn' "$searchInfo" | sed -rn 's/.*\"isbn\"\:(\w+),.*/\1/p')
+  _isbn2=$(grep 'books:isbn' "$searchInfo" | sed -rn 's/.*tent=(.*) prop.*/\1/p')
+  bookISBN[$index]=${_isbn1:-$_isbn2}
+  bookASIN[$index]=$(grep -im 1 'asin' "$searchInfo" | sed -rn 's/.*ASIN=(\w+)\\.*/\1/p')
 
-  pubInfo=$(grep -m 1 -P 'Published.*[1-2][0-9]{3}' "$searchInfo" | sed -rn 's/.*(Pub.*)<.*/\1/p')
+
+  #pubInfo=$(grep -m 1 -P 'Published.*[1-2][0-9]{3}' "$searchInfo" | sed -rn 's/.*(Pub.*)<.*/\1/p')
+  pubInfo=$(grep -m 1 'publicationInfo' "$searchInfo" | hxnormalize | hxselect -ic p |\
+    sed 's/Published //')
   bookYear[$index]=$(sed -rn 's/.*([0-9]{4}).*/\1/p' <<< "$pubInfo")
   bookPublisher[$index]=$(awk -F' by ' '{ print $2 }' <<< "$pubInfo")
 
-  if grep -q '(' <<< "$fullTitle"; then
-    fullSeries=$(awk -F'[()]' '{ print $2 }' <<< "$fullTitle")
+  # I give up!
+  if [[ -z $_series ]]; then
+    echo -e "${C4}Enter book series:${C0}: \c"
+    read -r fullSeries
   else
-    fullSeries=$(grep 'bookSeries' "$searchInfo" | awk -F'[()]' '{ print $2 }')
+    fullSeries="$_series"
+  fi
+  echo -e "${C2}++fullSeries=$fullSeries${C0}"
+
+  if grep -q ', #' <<< "$fullSeries"; then
+    sep=1
+  elif grep -q ' #' <<< "$fullSeries"; then
+    sep=2
+  elif grep -q ' Book ' <<< "$fullSeries"; then
+    sep=3
+  else
+    sep=4
   fi
 
-  if [[ -n $fullSeries ]]; then
-    if grep -q ', #' <<< "$fullSeries"; then
-      sep=1
-    elif grep -q ' #' <<< "$fullSeries"; then
-      sep=2
-    elif grep -q ' Book ' <<< "$fullSeries"; then
-      sep=3
-    else
-      sep=4
-    fi
+  case $sep in
+    1) _bookSeries=$(awk -F', #' '{ print $1 }' <<< "$fullSeries")
+       _seriesNum=$(awk -F', #' '{ print $2 }' <<< "$fullSeries")
+       ;;
+    2) _bookSeries=$(awk -F' #' '{ print $1 }' <<< "$fullSeries")
+       _seriesNum=$(awk -F' #' '{ print $2 }' <<< "$fullSeries")
+       ;;
+    3) _bookSeries=$(awk -F' Book ' '{ print $1 }' <<< "$fullSeries")
+       _seriesNum=$(awk -F' Book ' '{ print $2 }' <<< "$fullSeries")
+       ;;
+    4) _bookSeries=$fullSeries
+       ;;
+    *) _bookSeries="Unknown"
+       ;;
+   esac
 
-    case $sep in
-      1) _bookSeries=$(awk -F', #' '{ print $1 }' <<< "$fullSeries")
-         _seriesNum=$(awk -F', #' '{ print $2 }' <<< "$fullSeries")
-         ;;
-      2) _bookSeries=$(awk -F' #' '{ print $1 }' <<< "$fullSeries")
-         _seriesNum=$(awk -F' #' '{ print $2 }' <<< "$fullSeries")
-         ;;
-      3) _bookSeries=$(awk -F' Book ' '{ print $1 }' <<< "$fullSeries")
-         _seriesNum=$(awk -F' Book ' '{ print $2 }' <<< "$fullSeries")
-         ;;
-      4) _bookSeries=$fullSeries
-         ;;
-      *) _bookSeries="Unknown"
-         ;;
-     esac
+  majNum=$(awk -F'.' '{ printf("%02d", $1) }' <<< "$_seriesNum")
+  minNum=$(awk -F'.' '{ print $2 }' <<< "$_seriesNum")
 
-    majNum=$(awk -F'.' '{ printf("%02d", $1) }' <<< "$_seriesNum")
-    minNum=$(awk -F'.' '{ print $2 }' <<< "$_seriesNum")
+  if [[ $majNum == '00' ]]; then
+    unset _seriesNum
+  elif [[ -n $minNum ]]; then
+    _seriesNum="${majNum}.${minNum}"
+  else
+    _seriesNum="$majNum"
+  fi
 
-    if [[ $majNum == '00' ]]; then
-      unset _seriesNum
-    elif [[ -n $minNum ]]; then
-      _seriesNum="${majNum}.${minNum}"
-    else
-      _seriesNum="$majNum"
-    fi
-
-    if [[ -n $_seriesNum ]]; then
-      _bookSeries="$_bookSeries $_seriesNum"
-    fi
-
+  if [[ -n $_seriesNum ]]; then
+    _bookSeries="$_bookSeries $_seriesNum"
   else
     _bookSeries=${bookYear[$index]:-unknwn}
   fi
 
-  _bookSeries=${_bookSeries//:/-}
+  _bookSeries=${_bookSeries/:/-}
+  _bookSeries=${_bookSeries/&apos;/\'}
   _bookSeries=${_bookSeries//[^a-zA-Z0-9 -]/}
   bookSeries[$index]=$_bookSeries
 
-  bookRating[$index]=$(grep 'ratingValue' "$searchInfo" | sed -rn 's/.*([0-9]\.[0-9]{2}).*/\1/p')
+  bookRating[$index]=$_rating
 
-  image1=$(grep 'id=coverImage' "$searchInfo" | sed -n 's/.*src="\(.*\)">.*/\1/p')
-  image2=$(grep -m 1 -i 'editioncover' "$searchInfo" | sed -n 's/.*src="\(.*\)">.*/\1/p')
-  imageSource[$index]=${image1:-$image2}
-
-  if $verify; then
-    echo -e "${C4}Enter book author:${C0} ${bookAuthor[$index]}"
-    read -r _bookAuthor
-    bookAuthor[$index]=${_bookAuthor:-${bookAuthor[$index]}}
-    echo -e "${C4}Enter book series:${C0} ${bookSeries[$index]}"
-    read -r _bookSeries
-    bookSeries[$index]=${_bookSeries:-${bookSeries[$index]}}
-    echo -e "${C4}Enter book title:${C0} ${bookTitle[$index]}"
-    read -r _bookTitle
-    bookTitle[$index]=${_bookTitle:-${bookTitle[$index]}}
+  if [[ -n $_image ]]; then
+    imageSource[$index]=$_image
+  else
+    echo -e "${C4}Enter book image url:${C0}: \c"
+    read -r imageSource[$index]
   fi
 
   baseName[$index]="${bookAuthor[$index]} - ${bookSeries[$index]} - ${bookTitle[$index]}"
   bookInfo[$index]="$workDir/${baseName[$index]}.info"
-  bookLink[$index]="$workDir/${baseName[$index]}.url"
+  #bookLink[$index]="$workDir/${baseName[$index]}.url"
   bookCover[$index]="$workDir/${baseName[$index]}.jpg"
 
   if [[ -n ${imageSource[$index]} ]]; then
-    curl -s -o "${bookCover[$index]}" "${imageSource[$index]}" 
+    curl -s -o "${bookCover[$index]}" "${imageSource[$index]}"
   fi
 
-  cat <<EOF >"${bookLink[$index]}"
-[{000214A0-0000-0000-C000-000000000046}]
-Prop3=19,2
-[InternetShortcut]
-IDList=
-URL=${bookURL[$index]}
-EOF
+#  cat <<EOF >"${bookLink[$index]}"
+#[{000214A0-0000-0000-C000-000000000046}]
+#Prop3=19,2
+#[InternetShortcut]
+#IDList=
+#URL=${bookURL[$index]}
+#EOF
 
-summary1=$(sed -rn '/descriptionContainer/,/\/div/p' "$searchInfo" | grep -v ' <' |\
-  sed -rn 's/ +(.*)<.*/\1/p' | fold -s)
-summary2=$(sed -rn '/descriptionContainer/,/\/div/p' "$searchInfo" | sed 's/<br>//g' |\
-  sed -rn 's/^ +([A-Z].*)<.*$/\1/p' | sed 's/<.*//' | fold -s)
-summary=${summary1:-$summary2}
+summary=$(grep -A1 'titleComplete:' "$props" | grep 'description:' | sed 's/description://' | fold -s)
+# Filters to sanitize description text.
+summary=${summary//\/\\u003e/}
+summary=${summary//\\u003cbr/}
+mapfile _genre < <(grep -A1 ':Genre' "$props" | grep -E '^name:' | awk -F: '{ print $2}')
 
   cat << EOF >> "${bookInfo[$index]}"
    Author: ${bookAuthor[$index]}
     Title: ${bookTitle[$index]}
+     ASIN: ${bookASIN[$index]}
      ISBN: ${bookISBN[$index]}
    Series: ${bookSeries[$index]}
      Year: ${bookYear[$index]}
@@ -487,7 +528,7 @@ Publisher: ${bookPublisher[$index]}
 
 
 Classifications:
-$(grep 'people shelved this book' "$searchInfo" | sed -n 's/&#39;//g; s/.*title="\(.*\)">.*/\1/; s/^/  /p')
+  ${_genre[@]}
 
 
 Summary:
@@ -496,21 +537,25 @@ EOF
 
   # Replace extended characters with apostrophe
   # echo "X" | od -t x1c  # Display hex codes
-  sed -i 's/\xE2\x80\x9C/"/g; s/\xE2\x80\x9D/"/g; s/\xC3\x82//g; s/\xC5\x93/"/g; s/\xC2\x9D/"/g' "${bookInfo[$index]}" 
+  #sed -i 's/\xE2\x80\x9C/"/g; s/\xE2\x80\x9D/"/g; s/\xC3\x82//g; s/\xC5\x93/"/g; s/\xC2\x9D/"/g' "${bookInfo[$index]}"
 
-  # Check converted.log for already converted.
-  if grep -q "${baseName[$index]}" "$convertLog"; then
-    echo -e "${C4}SKIPPING:${C0} ${baseName[$index]} already converted."
-    return 1
-  else
-    cat << EOF
+  cat << EOF
   ${C0}bookAuthor: ${C7}${bookAuthor[$index]:0:80}${C0}
   ${C0}bookTitle: ${C7}${bookTitle[$index]:0:80}${C0}
   ${C0}bookSeries: ${C7}${bookSeries[$index]:0:80}${C0}
   ${C0}bookYear: ${C7}${bookYear[$index]}${C0}
   ${C0}bookRating: ${C7}${bookRating[$index]}${C0}
   ${C0}bookCover: ${C7}${imageSource[$index]}${C0}
+  ${C0}bookGenre: ${C7}${_genre[@]}${C0}
+  ${C0}bookSummary: ${C7}${summary}${C0}
 EOF
+
+  # Check converted.log for already converted.
+  if grep -q "${baseName[$index]}" "$convertLog"; then
+    echo -e "${C4}SKIPPING:${C0} ${baseName[$index]} already converted."
+    return 1
+  else
+    echo -e "${C1}Converting now${C0}"
   fi
 
   ## Confirm unrated books
@@ -556,7 +601,7 @@ EOM
 
   echo ""
   done
-  
+
   case $catagory in
     1) # Romance
       bookType="Romance"
@@ -637,10 +682,10 @@ reEncode()
 
     # Re-encode input file with my parameters.
     lame --nohist -m m -V 6 "$inFile" "$outFile"
-  
+
     outSize=$(/bin/ls -l "$outFile" | awk '{ print $5 }')
- 
-    ## This is for files that don't concatenate properly 
+
+    ## This is for files that don't concatenate properly
     if [[ $outSize -lt '4096000' ]]; then
       tempOut="$workDir/concat_44k.mp3"
       echo -e "${C8}>>> Re-encoding due to size error${C0}"
@@ -670,11 +715,11 @@ EOF
 
 tagIt()
 {
-  # Attempted to use several command line tag editors, mid3v2 does most of what I needed, but has some 
+  # Attempted to use several command line tag editors, mid3v2 does most of what I needed, but has some
   # issues with cover art....
   inFile=$1
   index=$2
-  
+
   echo -e "${C8}>>> Removing original ID3 tags${C0}"
   mid3v2 --delete-all "$inFile" >/dev/null 2>&1
 
@@ -727,7 +772,7 @@ moveIt()
 
   { sudo mv "${bookInfo[$index]}" "${outDir[$index]}";
     sudo mv "${bookCover[$index]}" "${outDir[$index]}";
-    sudo mv "${bookLink[$index]}" "${outDir[$index]}";
+    #sudo mv "${bookLink[$index]}" "${outDir[$index]}";
     sudo mv "${encodeFile[$index]}" "${outDir[$index]}"; }
   STATUS=$?
 
@@ -743,11 +788,11 @@ moveIt()
   sudo chmod 775 "$aDir"
   find "$aDir" -type d -exec sudo chmod 775 "{}" \;
   find "$aDir" -type f -exec sudo chmod 664 "{}" \;
-  
+
   mDate=$(date +%Y-%b-%d)
   mDate=${mDate^^}
-  
-  echo -e "${C8}>>> Updating convert log${C0}"  
+
+  echo -e "${C8}>>> Updating convert log${C0}"
   echo "$mDate, [$bookType], ${baseName[$index]}" >> $convertLog
 
   notify-send "Audiobook encode completed:" "${bookAuthor[$index]} - ${bookTitle[$index]}"
@@ -809,7 +854,7 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     -v | --verify) # Verify ID3 tags
-      verify=true
+      #verify=true
       shift
       ;;
     *) # Unknown option
