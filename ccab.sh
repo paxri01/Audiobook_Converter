@@ -247,9 +247,7 @@ searchIt()
   _searchData=$1
   _return="$workDir/search.json"
   _results="$workDir/results.json"
-  _engine_id=951f823e30dc84ad4
-  _api_key=AIzaSyD88Q-rHkVJ7u7hAyH89YmRD-35MjBlBU0
-  url='https://customsearch.googleapis.com/customsearch/v1?'
+  source ~/.api_info
   #url="https://www.goodreads.com/search?"
   #url="https://www.amazon.com/s?"
 
