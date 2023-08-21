@@ -21,10 +21,10 @@ i=0
 #shellcheck disable=SC2231
 for _FILE in *.$inFileExt; do
   inFile[$i]="$_FILE"
-  artist=$(ffprobe "$_FILE" 2>&1 |grep 'artist' | awk -F': ' '{ print $2 }')
-  album=$(ffprobe "$_FILE" 2>&1 |grep 'album' | awk -F': ' '{ print $2 }')
-  title=$(ffprobe "$_FILE" 2>&1 |grep 'title' | awk -F': ' '{ print $2 }')
-  track=$(ffprobe "$_FILE" 2>&1 |grep 'track' | awk -F': ' '{ print $2 }')
+  artist=$(ffprobe "$_FILE" 2>&1 |grep -m1 'artist' | awk -F': ' '{ print $2 }')
+  album=$(ffprobe "$_FILE" 2>&1 |grep -m1 'album' | awk -F': ' '{ print $2 }')
+  title=$(ffprobe "$_FILE" 2>&1 |grep -m1 'title' | awk -F': ' '{ print $2 }')
+  track=$(ffprobe "$_FILE" 2>&1 |grep -m1 'track' | awk -F': ' '{ print $2 }' | sed -rn 's/([0-9]+)\/.*/\1/p')
   track=$(printf '%02d' "$track")
   ## Specify where and what output file.
   if [[ $inFileExt == 'mp3' || $inFileExt == 'flac' ]]; then
