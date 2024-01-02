@@ -26,9 +26,8 @@ deadJim()
 trap 'deadJim' 1 2 3 15
 
 i=0
-#shellcheck disable=SC2231
-for _FILE in *.$inFileExt; do
-  inFile[$i]="$_FILE"
+for _FILE in *."$inFileExt"; do
+  inFile[i]="$_FILE"
   # echo "DEBUG: inFile=${_FILE}"
   artist=$(ffprobe "$_FILE" 2>&1 |grep '[Aa]rtist' | awk -F': ' '{ print $2 }')
   album=$(ffprobe "$_FILE" 2>&1 |grep '[Aa]lbum' | awk -F': ' '{ print $2 }')
@@ -37,7 +36,7 @@ for _FILE in *.$inFileExt; do
   track=$(printf '%02d' "$track")
   tmpOut="($artist) - $album - $track $title.mp3"
   ## Specify where and what output file.
-  outFile[$i]="./$album/$tmpOut"
+  outFile[i]="./$album/$tmpOut"
   # echo "DEBUG: outFile=${outFile[$i]}"
   ((i++))
 done 
