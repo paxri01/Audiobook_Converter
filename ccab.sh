@@ -299,7 +299,7 @@ searchInfo()
         ;;
       0) # Manually enter book URL
         echo -e "\n  ${C6}Enter book URL: ${C0}\c"
-        read -r bookURL[$index]
+        read -r bookURL["$index"]
         ;;
       s|S) # New search criteria
         echo -e "\n Enter new search criteria: \c"
@@ -487,7 +487,7 @@ parseInfo()
     imageSource[$index]=$_image
   else
     echo -e "${C4}Enter book image url:${C0}: \c"
-    read -r imageSource[$index]
+    read -r imageSource["$index"]
   fi
 
   baseName[$index]="${bookAuthor[$index]} - ${bookSeries[$index]} - ${bookTitle[$index]}"
