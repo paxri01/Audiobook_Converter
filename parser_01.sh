@@ -13,7 +13,9 @@ Series="$SeriesNum $SeriesName"
 
 Title=$(grep -m1 '<title>' <<< "$fullTitle" | sed -rn 's/.*Amazon.com: (.[^,]*): .*Book.*/\1/p')
 Author=$(grep -A2 Author "$bookInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
-Narrator=$(grep -A2 Narrator "$bookInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
+#Narrator=$(grep -A2 Narrator "$bookInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
+Narrator=$(sed -rn '/Narrator/, /ReleaseDate/p' "$bookInfo" | head -n -1 | tail -n +2 |\
+  tr -d '\n' | sed -r 's/<.[^A-Z,]*>//g; s/^ +//')
 Publisher=$(grep -A2 Publisher "$bookInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
 Length=$(grep -A3 ListeningLength "$bookInfo" | tail -1 | sed -rn 's/.*<span>(.*)<\/span>/\1/p')
 Date=$(grep -A3 ReleaseDate "$bookInfo" | tail -1 | sed -rn 's/.*<span>(.*)<\/span>/\1/p')

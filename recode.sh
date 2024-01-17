@@ -29,26 +29,43 @@ i=0
 #shellcheck disable=SC2231
 for _FILE in *.$inFileExt; do
   inFile[$i]="$_FILE"
-  # echo "DEBUG: inFile=${_FILE}"
-  artist=$(ffprobe "$_FILE" 2>&1 |grep '[Aa]rtist' | awk -F': ' '{ print $2 }')
-  album=$(ffprobe "$_FILE" 2>&1 |grep '[Aa]lbum' | awk -F': ' '{ print $2 }')
-  title=$(ffprobe "$_FILE" 2>&1 |grep '[Tt]itle' | awk -F': ' '{ print $2 }')
-  track=$(ffprobe "$_FILE" 2>&1 |grep '[Tt]rack' | awk -F': ' '{ print $2 }')
+  #echo "DEBUG: inFile=${_FILE}"
+  artist=$(ffprobe "$_FILE" 2>&1 |grep -E '^ +[Aa]rtist' | awk -F': ' '{ print $2 }')
+  #echo "DEBUG: Artist: '$artist'"
+  album=$(ffprobe "$_FILE" 2>&1 |grep -E '^ +[Aa]lbum' | awk -F': ' '{ print $2 }')
+  #echo "DEBUG: Album: '$album'"
+  title=$(ffprobe "$_FILE" 2>&1 |grep -E '^ +[Tt]itle' | awk -F': ' '{ print $2 }')
+  #echo "DEBUG: Title: '$title'"
+  #track=$(ffprobe "$_FILE" 2>&1 |grep '[Tt]rack' | awk -F': ' '{ print $2 }')
+  track=$(ffprobe "$_FILE" 2>&1 | sed -rn 's/.*track +: ([0-9]+).*/\1/p')
   track=$(printf '%02d' "$track")
+  #echo "DEBUG: Track: '$track'"
   tmpOut="($artist) - $album - $track $title.mp3"
+  tmpFlac="($artist) - $album - $track $title.flac"
   ## Specify where and what output file.
-  outFile[$i]="./$album/$tmpOut"
-  # echo "DEBUG: outFile=${outFile[$i]}"
+  outFile[$i]="./$album/mp3/$tmpOut"
+  flacOut[$i]="./$album/flac/$tmpFlac"
+  #echo "DEBUG: outFile=${outFile[$i]}"
+  #echo "DEBUG: flacOut=${outFile[$i]}"
   ((i++))
 done 
+
+if [[ ! -d "./$album" ]]; then
+  mkdir -p "./$album/mp3"
+  mkdir -p "./$album/flac"
+fi
+
+i=0
+while [[ $i -lt ${#inFile[*]} ]]; do
+  #echo -e "DEBUG:\n  inFile: \"${inFile[$i]}\"\n  outFile: \"${flacOut[$i]}\""
+  cp "${inFile[$i]}" "${flacOut[$i]}"
+  ((i++))
+done
 
 if [[ ${inFile[0]} == "*.$inFileExt" ]]; then
   echo -e "\nERROR: No .$inFileExt files found here, bailing."
   exit 2
 fi
-
-## Create sub-directory for new mp3 files.
-mkdir ./"$album" >/dev/null 2>&1
 
 i=0
 while [[ $i -lt ${#inFile[*]} ]]; do
