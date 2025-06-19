@@ -105,6 +105,7 @@ concat=false
 debug=false
 move=false
 recurse=false
+cuda_available="auto"
 #verify=false
 
 validateCommand()
@@ -124,6 +125,43 @@ validateInput()
   # Remove potentially dangerous characters
   #shellcheck disable=SC2001
   echo "$input" | sed "s/[;&|\`$(){}]//g"
+}
+
+checkCudaSupport()
+{
+  # Skip detection if explicitly disabled
+  if [[ $cuda_available == "false" ]]; then
+    echo -e "${C8}>>> CUDA acceleration disabled by user, using CPU encoding${C0}"
+    cuda_available=false
+    return 1
+  fi
+  
+  # Skip detection if explicitly enabled (user forced it)
+  if [[ $cuda_available == "true" ]]; then
+    echo -e "${C1}>>> CUDA acceleration forced by user${C0}"
+    cuda_available=true
+    return 0
+  fi
+  
+  # Auto-detect CUDA support
+  if command -v nvidia-smi >/dev/null 2>&1; then
+    if nvidia-smi >/dev/null 2>&1; then
+      # Check if FFmpeg has CUDA support
+      if ffmpeg -hide_banner -encoders 2>/dev/null | grep -q "nvenc\|cuda"; then
+        cuda_available=true
+        echo -e "${C1}>>> CUDA acceleration detected and available${C0}"
+        return 0
+      else
+        echo -e "${C4}>>> NVIDIA GPU detected but FFmpeg lacks CUDA support${C0}"
+      fi
+    else
+      echo -e "${C8}>>> nvidia-smi available but no GPU detected${C0}"
+    fi
+  fi
+  
+  cuda_available=false
+  echo -e "${C8}>>> CUDA acceleration not available, using CPU encoding${C0}"
+  return 1
 }
 
 cleanUp()
@@ -168,6 +206,10 @@ ${C3}NAME${C0}
 ${C3}OPTIONS${C0}
     ${C1}-c${C0}, ${C1}--concat${C0}
         Will combine detected files into a single .mp3 file.
+    ${C1}--cuda${C0}
+        Force enable CUDA acceleration (will fail if not available).
+    ${C1}--no-cuda${C0}
+        Disable CUDA acceleration and use CPU encoding only.
     ${C1}-d${C0}, ${C1}--debug${C0}
         Enable debug output.
     ${C1}--flac${C0}
@@ -178,7 +220,7 @@ ${C3}OPTIONS${C0}
         After re-encoding, will move new files to specified directory (baseDir).
         May add option value on the command line to avoid prompting if book
         type is know before hand [-m #].
-            Move Catagories:
+            Move Categories:
                1 = Romance
                2 = Hot
                3 = SciFi
@@ -375,7 +417,7 @@ searchInfo()
         ;;
       0) # Manually enter book URL
         echo -e "\n  ${C6}Enter book URL: ${C0}\c"
-        read -r bookURL[$index]
+        read -r bookURL["$index"]
         ;;
       s|S) # New search criteria
         echo -e "\n Enter new search criteria: \c"
@@ -439,7 +481,7 @@ parseInfo()
     _title=$(sed -rn 's/.*Amazon.com: (.[^,]*): .*Book.*/\1/p' <<< "$_fullTitle" |\
       sed 's/ Audible Audio Edition//;  s/ (Audible Audio Edition)//; s/ (Unabridged)//' |\
       sed 's/: A LitRPG Adventure//')
-      _title=${_title//\&#39;/\'}
+      #_title=${_title//\&#39;/\'}
   fi
 
   echo -e "${C3}Confirm book title: [${C0}${_title}${C3}]${C0} \c"
@@ -453,7 +495,7 @@ parseInfo()
   if [[ -z $_author ]]; then
     _author=$(grep -A2 Author "$tmpInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
   fi
-  _author=${_author/,.*/}
+  _author=${_author//,.*/}
   echo -e "${C3}Confirm book author: [${C0}${_author}${C3}]${C0} \c"
   read -r tmpAuthor
   tmpAuthor=$(validateInput "$tmpAuthor")
@@ -482,7 +524,7 @@ parseInfo()
   _series="$_seriesName $_seriesNum"
   _series=${_series//\&amp;/\&}
   _series=${_series//\&apos;/\'}
-  _series=${_series//\&#39;/\'}
+  #_series=${_series//\&#39;/\'}
   echo -e "${C2}_series: $_series${C0}"
 
   _narrator=$(grep -A1 'Narrator' "$richInfo" | tail -1)
@@ -593,7 +635,7 @@ parseInfo()
     imageSource[$index]=$_image
   else
     echo -e "${C4}Enter book image url:${C0}: \c"
-    read -r imageSource[$index]
+    read -r imageSource["$index"]
   fi
 
   baseName[$index]="${bookAuthor[$index]} - ${bookSeries[$index]} - ${bookTitle[$index]}"
@@ -755,7 +797,22 @@ checkFile()
   validateCommand ffmpeg
   if [[ ! ${extension,,} =~ (mp3|mp4) ]]; then
     echo -e "${C8}>>> Converting $(basename "$inFile")...${C2}"
-    ffmpeg -hide_banner -loglevel error -stats -i "$inFile" -vn -sn "$outFile"
+    
+    # Use CUDA acceleration for format conversion if available
+    if $cuda_available; then
+      echo -e "${C8}>>> Using CUDA for format conversion${C0}"
+      if ffmpeg -hide_banner -loglevel error -stats \
+        -hwaccel cuda -hwaccel_output_format cuda \
+        -i "$inFile" -vn -sn "$outFile"; then
+        echo -e "${C8}CUDA conversion completed${C0}"
+      else
+        echo -e "${C4}>>> CUDA conversion failed, using CPU${C0}"
+        ffmpeg -hide_banner -loglevel error -stats -i "$inFile" -vn -sn "$outFile"
+      fi
+    else
+      ffmpeg -hide_banner -loglevel error -stats -i "$inFile" -vn -sn "$outFile"
+    fi
+    
     ## Reset inFiles to new converted file
     inFiles[$index]="$outFile"
     echo -e "${C8}Done converting file to mp3${C0}\n"
@@ -782,9 +839,28 @@ reEncode()
   checkFile=0
   while [[ $checkFile -lt 1 ]]; do
 
-    # Re-encode input file with my parameters.
-    validateCommand lame
-    lame --nohist -m m -V 6 "$inFile" "$outFile"
+    # Use CUDA-accelerated encoding if available, otherwise fall back to LAME
+    if $cuda_available; then
+      echo -e "${C1}>>> Using CUDA-accelerated encoding${C0}"
+      # Use FFmpeg with NVIDIA hardware acceleration for decoding and encoding
+      if ffmpeg -hide_banner -loglevel error -stats \
+        -hwaccel cuda -hwaccel_output_format cuda \
+        -i "$inFile" \
+        -c:a libmp3lame -b:a "${bookBitrate[$index]}k" \
+        -ar 44100 -ac 2 \
+        "$outFile"; then
+        echo -e "${C8}CUDA-accelerated encoding completed${C0}"
+      else
+        echo -e "${C4}>>> CUDA encoding failed, falling back to CPU${C0}"
+        cuda_available=false
+        continue
+      fi
+    else
+      # Re-encode input file with LAME (CPU encoding).
+      validateCommand lame
+      lame --nohist -m m -V 6 "$inFile" "$outFile"
+      echo -e "${C8}CPU encoding completed${C0}"
+    fi
 
     outSize=$(/bin/ls -l "$outFile" | awk '{ print $5 }')
 
@@ -792,20 +868,42 @@ reEncode()
     if [[ $outSize -lt 4096000 ]]; then
       tempOut="$workDir/concat_44k.mp3"
       echo -e "${C8}>>> Re-encoding due to size error (${outSize} bytes)${C0}"
-      if ffmpeg -hide_banner -loglevel quiet -stats -i "$inFile" -codec:a libmp3lame -ar 44100 "$tempOut"; then
-        mv "$tempOut" "$outFile"
-        checkFile=1
+      
+      if $cuda_available; then
+        # Try CUDA fallback encoding
+        if ffmpeg -hide_banner -loglevel quiet -stats \
+          -hwaccel cuda -hwaccel_output_format cuda \
+          -i "$inFile" \
+          -codec:a libmp3lame -ar 44100 \
+          "$tempOut"; then
+          mv "$tempOut" "$outFile"
+          checkFile=1
+        else
+          echo -e "${C4}>>> CUDA fallback failed, using CPU${C0}"
+          if ffmpeg -hide_banner -loglevel quiet -stats -i "$inFile" -codec:a libmp3lame -ar 44100 "$tempOut"; then
+            mv "$tempOut" "$outFile"
+            checkFile=1
+          else
+            echo -e "${C5}ERROR: Re-encoding failed${C0}"
+            checkFile=1
+            return 1
+          fi
+        fi
       else
-        echo -e "${C5}ERROR: Re-encoding failed${C0}"
-        checkFile=1
-        return 1
+        # CPU fallback
+        if ffmpeg -hide_banner -loglevel quiet -stats -i "$inFile" -codec:a libmp3lame -ar 44100 "$tempOut"; then
+          mv "$tempOut" "$outFile"
+          checkFile=1
+        else
+          echo -e "${C5}ERROR: Re-encoding failed${C0}"
+          checkFile=1
+          return 1
+        fi
       fi
     else
       checkFile=1
     fi
   done
-
-  echo -e "${C8}lame encoding completed${C0}"
 
   cat <<EOF >>done.txt
 workDir:    $workDir
@@ -901,7 +999,7 @@ moveIt()
   mDate=${mDate^^}
 
   echo -e "${C8}>>> Updating convert log${C0}"
-  echo "$mDate, [$bookType], ${baseName[$index]}" >> $convertLog
+  echo "$mDate;[$bookType];${baseName[$index]}" >> $convertLog
 
   notify-send "Audiobook encode completed:" "${bookAuthor[$index]} - ${bookTitle[$index]}"
   return 0
@@ -924,6 +1022,14 @@ while [[ $# -gt 0 ]]; do
       ;;
     -c | --concat) # Concat all files found
       concat='true'
+      shift
+      ;;
+    --cuda) # Force enable CUDA acceleration
+      cuda_available="true"
+      shift
+      ;;
+    --no-cuda) # Disable CUDA acceleration
+      cuda_available="false"
       shift
       ;;
     -d | --debug) # Enable debug output
@@ -976,6 +1082,7 @@ done
 
 ## MAIN
 ## -------------------------------------
+checkCudaSupport
 getFiles
 ## First loop to collect book information
 j=0
