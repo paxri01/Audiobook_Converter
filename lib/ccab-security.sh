@@ -58,12 +58,15 @@ sanitizeHTML()
   html_content=$(echo "$html_content" | sed 's/<style[^>]*>.*<\/style>//gI')
   
   # Remove potentially dangerous HTML tags
+  #shellcheck disable=SC2001
   html_content=$(echo "$html_content" | sed 's/<\(iframe\|object\|embed\|form\|input\)[^>]*>//gI')
   
   # Remove HTML entities that could be problematic
+  #shellcheck disable=SC2001
   html_content=$(echo "$html_content" | sed 's/&[#a-zA-Z0-9]*;//g')
   
   # Remove HTML comments
+  #shellcheck disable=SC2001
   html_content=$(echo "$html_content" | sed 's/<!--.*-->//g')
   
   # Write sanitized content to file if specified
@@ -142,9 +145,11 @@ sanitizeFilename()
   filename="${filename:0:$max_length}"
   
   # Remove dangerous characters for filenames
+  #shellcheck disable=SC2001
   filename=$(echo "$filename" | sed 's/[^a-zA-Z0-9._-]/_/g')
   
   # Ensure it doesn't start with dot or dash
+  #shellcheck disable=SC2001
   filename=$(echo "$filename" | sed 's/^[.-]//')
   
   # Add fallback if empty

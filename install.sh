@@ -1,20 +1,20 @@
 #!/bin/bash
 
 ## ========================================================================================
-##       Title: deploy.sh
+##       Title: install.sh
 ##      Author: R. L. Paxton
 ##     Version: 4.0
 ##        Date: 2025-06-19
 ##     License: Apache 2.0
-## Description: Deployment script for CCAB audiobook converter
+## Description: Installation script for CCAB audiobook converter
 ##              Installs CCAB to /opt/ccab with proper directory structure
 ## ========================================================================================
 
 # Colors for output
 C0='\033[0;00m'    # Normal
-C1='\033[0;92m'    # Green
-C4='\033[0;93m'    # Yellow
-C5='\033[0;91m'    # Red
+C1='\033[0;91m'    # Red
+C2='\033[0;92m'    # Green
+C3='\033[0;93m'    # Yellow
 
 # Deployment configuration
 INSTALL_DIR="/opt/ccab"
@@ -53,7 +53,6 @@ check_root() {
 validate_source() {
     local required_files=(
         "ccab-modular.sh"
-        "ccab.sh"
         "lib/ccab-config.sh"
         "lib/ccab-security.sh"
         "lib/ccab-utils.sh"
@@ -111,7 +110,7 @@ create_directories() {
 install_files() {
     print_status "INFO" "Installing CCAB files..."
     
-    # Install main scripts (use deployment-ready version)
+    # Install main scripts (use production-ready version)
     if [[ -f "$SCRIPT_DIR/ccab-deployed.sh" ]]; then
         cp "$SCRIPT_DIR/ccab-deployed.sh" "$INSTALL_DIR/bin/ccab" || {
             print_status "ERROR" "Failed to install main script"
@@ -125,14 +124,6 @@ install_files() {
     fi
     chmod +x "$INSTALL_DIR/bin/ccab"
     print_status "INFO" "Installed main script: $INSTALL_DIR/bin/ccab"
-    
-    # Install original script as backup
-    cp "$SCRIPT_DIR/ccab.sh" "$INSTALL_DIR/bin/ccab-original" || {
-        print_status "ERROR" "Failed to install original script"
-        exit 1
-    }
-    chmod +x "$INSTALL_DIR/bin/ccab-original"
-    print_status "INFO" "Installed original script: $INSTALL_DIR/bin/ccab-original"
     
     # Install library modules
     cp "$SCRIPT_DIR"/lib/*.sh "$INSTALL_DIR/lib/" || {
@@ -287,7 +278,6 @@ display_summary() {
     echo
     echo "Files installed:"
     echo "  Main script:     $INSTALL_DIR/bin/ccab"
-    echo "  Original script: $INSTALL_DIR/bin/ccab-original"
     echo "  Library modules: $INSTALL_DIR/lib/"
     echo "  Documentation:   $INSTALL_DIR/docs/"
     echo "  Configuration:   $CONFIG_DIR/ccab.conf"
@@ -315,22 +305,28 @@ display_summary() {
     echo "========================================================================================"
 }
 
-# Main deployment function
+# Main installation function
 main() {
     echo "========================================================================================"
-    echo -e "${C2}CCAB Audiobook Converter Deployment Script v4.0${C0}"
+    echo -e "${C2}CCAB Audiobook Converter Installation Script v4.0${C0}"
     echo "========================================================================================"
     echo
     
     check_root
     validate_source
+    sleep 1
     create_directories
+    sleep 1
     install_files
+    sleep 1
     update_script_paths
+    sleep 1
     set_permissions
+    sleep 1
     create_symlink
+    sleep 1
     
-    echo -e "${C2}>>> Deployment completed successfully${C0}"
+    echo -e "${C2}>>> Installation completed successfully${C0}"
     display_summary
     exit 0
 }

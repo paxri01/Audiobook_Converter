@@ -221,6 +221,7 @@ buildDirectoryPath()
   
   # Store paths in arrays for later use  
   authorDirs[$index]="$author_path"
+  #shellcheck disable=SC2034
   outDirs[$index]="$full_path"
   
   echo "$full_path"

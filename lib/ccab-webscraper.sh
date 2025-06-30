@@ -126,6 +126,7 @@ extractAmazonRichInfo()
     series_info=$(echo "$rich_section" | grep -A10 'book_details-series' | grep -o 'Book [0-9]* of [0-9]*' | head -1)
     if [[ -n "$series_info" ]]; then
       local series_num=""
+      #shellcheck disable=SC2001
       series_num=$(echo "$series_info" | sed 's/Book \([0-9]*\) of [0-9]*/\1/')
       SCRAPED_SERIES_NUMBERS[$output_index]=$(printf "%02d" "$series_num" 2>/dev/null || echo "01")
     fi

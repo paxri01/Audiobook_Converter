@@ -13,7 +13,9 @@
 # Colors for output
 C0='\033[0;00m'    # Normal
 C1='\033[0;92m'    # Green
+#shellcheck disable=SC2034
 C4='\033[0;93m'    # Yellow
+#shellcheck disable=SC2034
 C5='\033[0;91m'    # Red
 
 # Installation paths
@@ -162,8 +164,10 @@ main() {
     # Detect installations
     local detection
     detection=$(detect_installations)
-    local system_found=$(echo "$detection" | cut -d' ' -f1)
-    local user_found=$(echo "$detection" | cut -d' ' -f2)
+    local system_found
+    local user_found
+    system_found=$(echo "$detection" | cut -d' ' -f1)
+    user_found=$(echo "$detection" | cut -d' ' -f2)
     
     if [[ "$system_found" == "false" && "$user_found" == "false" ]]; then
         print_status "INFO" "No CCAB installations found"

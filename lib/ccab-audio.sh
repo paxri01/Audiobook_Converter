@@ -391,39 +391,49 @@ convertAudioFormat()
   
   case "$format" in
     "mp3")
-      ffmpeg -hide_banner -loglevel error \
+      if ffmpeg -hide_banner -loglevel error \
         -i "$inFile" \
         -c:a libmp3lame -b:a "${bitrate}k" \
         -ar 44100 -ac 2 \
-        "$outFile" 2>/dev/null
+        "$outFile" 2>/dev/null; then
+        logMessage "INFO" "Format conversion completed"
+        return 0
+      else
+        logMessage "ERROR" "Format conversion failed"
+        return 1
+      fi
       ;;
     "flac")
-      ffmpeg -hide_banner -loglevel error \
+      if ffmpeg -hide_banner -loglevel error \
         -i "$inFile" \
         -c:a flac \
         -ar 44100 -ac 2 \
-        "$outFile" 2>/dev/null
+        "$outFile" 2>/dev/null; then
+        logMessage "INFO" "Format conversion completed"
+        return 0
+      else
+        logMessage "ERROR" "Format conversion failed"
+        return 1
+      fi
       ;;
     "m4a")
-      ffmpeg -hide_banner -loglevel error \
+      if ffmpeg -hide_banner -loglevel error \
         -i "$inFile" \
         -c:a aac -b:a "${bitrate}k" \
         -ar 44100 -ac 2 \
-        "$outFile" 2>/dev/null
+        "$outFile" 2>/dev/null; then
+        logMessage "INFO" "Format conversion completed"
+        return 0
+      else
+        logMessage "ERROR" "Format conversion failed"
+        return 1
+      fi
       ;;
     *)
       logMessage "ERROR" "Unsupported audio format: $format"
       return 1
       ;;
   esac
-  
-  if [[ $? -eq 0 ]]; then
-    logMessage "INFO" "Format conversion completed"
-    return 0
-  else
-    logMessage "ERROR" "Format conversion failed"
-    return 1
-  fi
 }
 
 # Export audio module functions for external use

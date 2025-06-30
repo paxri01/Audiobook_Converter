@@ -531,6 +531,37 @@ main()
   
   # Perform metadata lookup if requested
   if [[ "$lookupMetadata" == "true" ]]; then
+    # Prompt for book.html download if interactive mode
+    if [[ "$interactive" == "true" ]]; then
+      echo
+      echo -e "${C3}>>> Metadata Lookup Mode Enabled${C0}"
+      echo -e "${C3}>>> For best results, you can provide a pre-downloaded book.html file${C0}"
+      echo -e "${C3}>>> from Amazon, Goodreads, or Audible with book details.${C0}"
+      echo
+      echo -n "Do you have a book.html file to use? [y/N]: "
+      read -r response
+      
+      if [[ "$response" =~ ^[Yy] ]]; then
+        echo -n "Enter path to book.html file: "
+        read -r html_file_path
+        
+        if [[ -f "$html_file_path" && -r "$html_file_path" ]]; then
+          # Copy the HTML file to working directory for processing
+          #shellcheck disable=SC2154
+          cp "$html_file_path" "$workDir/book.html" || {
+            echo -e "${C1}>>> Error: Could not copy HTML file${C0}"
+          }
+          echo -e "${C2}>>> Using provided book.html file for metadata extraction${C0}"
+        else
+          echo -e "${C1}>>> Error: File not found or not readable: $html_file_path${C0}"
+          echo -e "${C3}>>> Continuing with automatic search instead${C0}"
+        fi
+      else
+        echo -e "${C3}>>> Continuing with automatic online search${C0}"
+      fi
+      echo
+    fi
+    
     performMetadataLookup "$file_count"
   fi
   
