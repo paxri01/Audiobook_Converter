@@ -1,5 +1,6 @@
 #!/bin/bash
 #shellcheck disable=SC2004
+#shellcheck disable=SC2034
 
 ## ========================================================================================
 ##       Title: ccab-config.sh
@@ -12,9 +13,7 @@
 ## ========================================================================================
 
 # Module identification
-#shellcheck disable=SC2034
 CCAB_CONFIG_MODULE="ccab-config"
-#shellcheck disable=SC2034
 CCAB_CONFIG_VERSION="4.0"
 
 ## Configuration loading
@@ -36,7 +35,6 @@ loadConfiguration()
     if [[ -f "$config_file" && -r "$config_file" ]]; then
       #shellcheck disable=SC1090
       source "$config_file"
-      #shellcheck disable=SC2034
       CONFIG_SOURCE="$config_file"
       return 0
     fi
@@ -107,26 +105,18 @@ validateConfiguration()
 applyConfiguration()
 {
   # Map configuration variables to script variables for backwards compatibility
-  #shellcheck disable=SC2034
   targetBitrate=$TARGET_BITRATE
-  #shellcheck disable=SC2034
   tmpDir=$TMP_DIR
-  #shellcheck disable=SC2034
+  html_file_path="$TMP_DIR/$TEMP_BOOK_HTML"
   logDir=$LOG_DIR
-  #shellcheck disable=SC2034
-  baseDir=$BASE_DIR
-  #shellcheck disable=SC2034
-  user=$FILE_USER
-  #shellcheck disable=SC2034
-  group=$FILE_GROUP
-  #shellcheck disable=SC2034
-  minFileSize=$MIN_FILE_SIZE
-  #shellcheck disable=SC2034
   convertLog="$LOG_DIR/$CONVERT_LOG_FILE"
+  baseDir=$BASE_DIR
+  user=$FILE_USER
+  group=$FILE_GROUP
+  minFileSize=$MIN_FILE_SIZE
   
   # Apply debug setting
   if [[ "$DEBUG_DEFAULT" == "true" ]]; then
-    #shellcheck disable=SC2034
     debug=true
   fi
   
@@ -146,7 +136,6 @@ setupDirectories()
       return 2
     }
   fi
-  #shellcheck disable=SC2034
   workDir=$(mktemp -d "$tmpDir/ccab/tmp.XXXXX") || {
     echo -e "${C1}[RC:2] ERROR: Cannot create working directory${C0}"
     return 2

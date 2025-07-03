@@ -23,6 +23,30 @@ DEFAULT_ENCODER="ccab-converter"
 # Module initialization flag
 CCAB_METADATA_INITIALIZED=false
 
+# Extract primary author only (remove co-authors)
+extractPrimaryAuthor()
+{
+  local author_string="$1"
+  local primary_author=""
+  
+  if [[ -z "$author_string" ]]; then
+    echo ""
+    return 1
+  fi
+  
+  # Remove co-authors using common separators
+  # Handles: "Author1 & Author2", "Author1 and Author2", "Author1, Author2", "Author1 with Author2"
+  # Also handles "Author1; Author2" and "Author1 | Author2"
+  primary_author=$(echo "$author_string" | sed -E 's/[[:space:]]*(&|and|,|with|;|\|)[[:space:]].*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  
+  # If the result is empty, return the original
+  if [[ -z "$primary_author" ]]; then
+    primary_author="$author_string"
+  fi
+  
+  echo "$primary_author"
+}
+
 # Initialize metadata processing module
 initializeMetadata()
 {
@@ -147,7 +171,14 @@ extractMetadata()
   fi
   
   if [[ -n "$_bookAuthor" ]]; then
-    bookAuthors[$index]="$_bookAuthor"
+    # Extract only the primary author, removing co-authors
+    local primary_author
+    primary_author=$(extractPrimaryAuthor "$_bookAuthor")
+    bookAuthors[$index]="$primary_author"
+    
+    if [[ "$_bookAuthor" != "$primary_author" ]]; then
+      logMessage "DEBUG" "Primary author extracted from metadata: '$primary_author' (from: '$_bookAuthor')"
+    fi
   fi
   
   bookBitrates[$index]="$_bookBitrate"
@@ -484,6 +515,7 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   # Module is being sourced, export functions
   export -f initializeMetadata
   export -f validateMetadataCommands
+  export -f extractPrimaryAuthor
   export -f extractMetadata
   export -f promptForMetadata
   export -f tagIt

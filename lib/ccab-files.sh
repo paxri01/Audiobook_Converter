@@ -126,7 +126,7 @@ probeFile()
   
   format_name=$(echo "$probe_output" | jq -r '.format.format_name // "unknown"' 2>/dev/null)
   duration_val=$(echo "$probe_output" | jq -r '.format.duration // "0"' 2>/dev/null)
-  size_val=$(jq -r '.format.size' <<< "$probe_output")
+  size_val=$(echo "$probe_output" | jq -r '.format.size // "0"' 2>/dev/null)
   bit_rate=$(echo "$probe_output" | jq -r '.format.bit_rate // "0"' 2>/dev/null)
   
   # Get audio stream info
@@ -141,8 +141,8 @@ probeFile()
   sampleRate[$index]="${sample_rate:-44100}"
   channels[$index]="${channels_val:-2}"
   
-  # Interactive prompts if metadata is missing or unclear
-  if [[ "$duration_val" == "0" || "$duration_val" == "null" ]]; then
+  # Interactive prompts if metadata is missing or unclear (only in interactive mode)
+  if [[ "$duration_val" == "0" || "$duration_val" == "null" ]] && [[ "${interactive:-true}" == "true" ]]; then
     echo -e "${C3}>>> Warning: Could not determine duration for: ${baseName[$index]}${C0}"
     echo -n ">>> Enter duration in seconds (or press Enter to skip): "
     read -r user_duration
@@ -163,10 +163,14 @@ probeFile()
       fileFormat[$index]="flac"
       ;;
     *)
-      echo -e "${C3}>>> Unknown format for: ${baseName[$index]}${C0}"
-      echo -n ">>> Enter format (mp3/m4a/flac) or press Enter for mp3: "
-      read -r user_format
-      fileFormat[$index]="${user_format:-mp3}"
+      if [[ "${interactive:-true}" == "true" ]]; then
+        echo -e "${C3}>>> Unknown format for: ${baseName[$index]}${C0}"
+        echo -n ">>> Enter format (mp3/m4a/flac) or press Enter for mp3: "
+        read -r user_format
+        fileFormat[$index]="${user_format:-mp3}"
+      else
+        fileFormat[$index]="mp3"  # Default to mp3 in non-interactive mode
+      fi
       ;;
   esac
   

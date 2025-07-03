@@ -360,9 +360,15 @@ moveIt()
     return 1
   fi
   
-  # Set permissions
-  if ! setDirectoryPermissions "${authorDirs[$index]}"; then
-    logMessage "WARN" "Failed to set directory permissions"
+  # Set permissions for author directory (parent of target_dir)
+  local author_dir
+  author_dir=$(dirname "$target_dir")
+  if [[ -n "$author_dir" && -d "$author_dir" ]]; then
+    if ! setDirectoryPermissions "$author_dir"; then
+      logMessage "WARN" "Failed to set directory permissions"
+    fi
+  else
+    logMessage "WARN" "Author directory not found or invalid: $author_dir"
   fi
   
   # Update convert log

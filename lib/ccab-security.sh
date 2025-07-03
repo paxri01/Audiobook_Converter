@@ -123,12 +123,15 @@ createSecureTempFile()
   
   # Ensure temp directory exists
   #shellcheck disable=SC2154
-  if [[ ! -d "$tmpDir/ccab" ]]; then
-    mkdir -p "$tmpDir/ccab" || return 1
+  local temp_base_dir="${tmpDir:-/tmp}"
+  temp_base_dir="${temp_base_dir%/}"  # Remove trailing slash
+  
+  if [[ ! -d "$temp_base_dir" ]]; then
+    mkdir -p "$temp_base_dir" || return 1
   fi
   
   # Create secure temporary file with restrictive permissions
-  temp_file=$(mktemp "$tmpDir/ccab/${prefix}.XXXXXX${suffix}") || return 1
+  temp_file=$(mktemp "${temp_base_dir}/${prefix}.XXXXXX${suffix}") || return 1
   chmod 600 "$temp_file" || return 1
   echo "$temp_file"
 }

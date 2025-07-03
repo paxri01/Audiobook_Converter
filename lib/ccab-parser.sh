@@ -1,5 +1,7 @@
 #!/bin/bash
 #shellcheck disable=SC2004
+#shellcheck disable=SC2034
+#shellcheck disable=SC2154
 
 ## ========================================================================================
 ##       Title: ccab-parser.sh
@@ -12,17 +14,12 @@
 ## ========================================================================================
 
 # Module identification
-#shellcheck disable=SC2034
 CCAB_PARSER_MODULE="ccab-parser"
-#shellcheck disable=SC2034
 CCAB_PARSER_VERSION="4.0"
 
 # Parser configuration variables
-#shellcheck disable=SC2034
-declare -g SEARCH_RETRIES=3
-#shellcheck disable=SC2034
-declare -g SEARCH_TIMEOUT=30
-#shellcheck disable=SC2034
+declare -g SEARCH_RETRIES=2
+declare -g SEARCH_TIMEOUT=15
 declare -g MAX_DOWNLOAD_SIZE="2M"
 
 # Book metadata arrays (global for module use)
@@ -51,84 +48,161 @@ declare -g tempRichFile=""
 # Perform Google Custom Search API query
 searchBooks()
 {
+  {
   local search_query="$1"
   local max_results="${2:-5}"
   local retry_count=0
   
   logMessage "INFO" "Searching for: $search_query"
+  echo -e "${C6}>>> Checking API credentials...${C0}" >&2
   
-  # Validate and sanitize search query
-  search_query=$(validateInput "$search_query" 200)
+  # Skip validation for debugging - potential hang source
+  echo -e "${C6}>>> Skipping input validation for debugging...${C0}" >&2
+  # search_query=$(validateInput "$search_query" 200)
   if [[ -z "$search_query" ]]; then
     logMessage "ERROR" "Invalid or empty search query"
     return 1
   fi
   
   # Check for required API credentials
+  echo -e "${C6}>>> Looking for API keys file at: $HOME/.config/keys${C0}" >&2
   if [[ ! -f "$HOME/.config/keys" ]]; then
     logMessage "ERROR" "API keys file not found: $HOME/.config/keys"
+    logMessage "INFO" "Please create $HOME/.config/keys with your Google Custom Search API credentials:"
+    logMessage "INFO" "  _engine_id=\"your_search_engine_id\""
+    logMessage "INFO" "  _api_key=\"your_google_api_key\""
     return 1
   fi
   
   # Source API credentials
+  echo -e "${C6}>>> Loading API credentials...${C0}" >&2
   #shellcheck disable=SC1091
   if ! source "$HOME/.config/keys"; then
-    logMessage "ERROR" "Failed to load API credentials"
+    logMessage "ERROR" "Failed to load API credentials from $HOME/.config/keys"
+    logMessage "INFO" "Please check that the file is readable and contains valid bash syntax"
     return 1
   fi
   
   # Validate API credentials
+  echo -e "${C6}>>> API credentials loaded, validating...${C0}" >&2
   if [[ -z "${_engine_id:-}" || -z "${_api_key:-}" ]]; then
-    logMessage "ERROR" "Missing required API credentials (_engine_id, _api_key)"
+    logMessage "ERROR" "Missing required API credentials in $HOME/.config/keys"
+    logMessage "INFO" "Required variables:"
+    logMessage "INFO" "  _engine_id=\"your_search_engine_id\""
+    logMessage "INFO" "  _api_key=\"your_google_api_key\""
     return 1
   fi
   
-  # URL encode the search query
+  # Basic validation of API key format
+  if [[ ! "${_api_key}" =~ ^[A-Za-z0-9_-]{35,45}$ ]]; then
+    logMessage "WARN" "API key format appears invalid (should be 35-45 alphanumeric characters)"
+  fi
+  
+  if [[ ! "${_engine_id}" =~ ^[a-f0-9]{12}:[a-f0-9]{11}$ ]] && [[ ! "${_engine_id}" =~ ^[0-9a-z_-]{10,30}$ ]]; then
+    logMessage "WARN" "Engine ID format appears invalid"
+  fi
+  
+  # URL encode the search query - simplified for debugging
+  echo -e "${C6}>>> URL encoding search query...${C0}" >&2
   local encoded_query
-  encoded_query=$(urlEncode "$search_query")
+  encoded_query="${search_query// /+}"  # Simple space replacement instead of full encoding
+  echo -e "${C6}>>> Encoded query: $encoded_query${C0}" >&2
   
   # Construct search URL
+  echo -e "${C6}>>> Constructing search URL...${C0}" >&2
   local search_url="https://www.googleapis.com/customsearch/v1"
   search_url+="?key=$_api_key"
   search_url+="&cx=$_engine_id"
   search_url+="&q=$encoded_query"
   search_url+="&num=$max_results"
   search_url+="&fields=items(title,link,snippet)"
+  echo -e "${C6}>>> Search URL ready${C0}" >&2
   
-  # Perform search with retries
+  # Perform search with retries and enhanced timeout handling
+  echo -e "${C6}>>> Starting search retry loop...${C0}" >&2
   local search_results=""
   while [[ $retry_count -lt $SEARCH_RETRIES ]]; do
+    echo -e "${C6}>>> Search attempt $((retry_count + 1))/$SEARCH_RETRIES${C0}" >&2
     logMessage "DEBUG" "Search attempt $((retry_count + 1))/$SEARCH_RETRIES"
+    logMessage "DEBUG" "Search URL: $search_url"
     
-    search_results=$(curl -s \
+    # Use timeout command as additional safeguard
+    echo -e "${C6}>>> Executing curl request...${C0}" >&2
+    search_results=$(timeout "$SEARCH_TIMEOUT" curl -s \
       --max-time "$SEARCH_TIMEOUT" \
+      --connect-timeout 10 \
       --max-filesize "$MAX_DOWNLOAD_SIZE" \
       --user-agent "CCAB/4.0 (AudiobookConverter)" \
       "$search_url" 2>/dev/null)
+    local curl_exit_code=$?
+    echo -e "${C6}>>> Curl request completed with exit code: $curl_exit_code${C0}" >&2
+    logMessage "DEBUG" "Curl exit code: $curl_exit_code"
     
-    if [[ -n "$search_results" && "$search_results" =~ \"items\" ]]; then
+    echo -e "${C6}>>> Checking curl results...${C0}" >&2
+    
+    if [[ $curl_exit_code -eq 0 && -n "$search_results" && "$search_results" =~ \"items\" ]]; then
+      echo -e "${C6}>>> Search successful with results${C0}" >&2
+      logMessage "DEBUG" "Search successful with results"
       break
+    elif [[ $curl_exit_code -eq 124 ]]; then
+      echo -e "${C6}>>> Search timed out${C0}" >&2
+      logMessage "WARN" "Search timed out after ${SEARCH_TIMEOUT}s"
+    elif [[ $curl_exit_code -eq 22 ]]; then
+      echo -e "${C6}>>> HTTP error${C0}" >&2
+      logMessage "WARN" "HTTP error (possibly rate limited or invalid request)"
+    else
+      echo -e "${C6}>>> Search failed${C0}" >&2
+      logMessage "WARN" "Search failed with exit code $curl_exit_code"
     fi
     
     ((retry_count++))
-    sleep 2
+    if [[ $retry_count -lt $SEARCH_RETRIES ]]; then
+      logMessage "DEBUG" "Waiting 2 seconds before retry..."
+      sleep 2
+    fi
   done
   
+  echo -e "${C6}>>> Exiting search retry loop${C0}" >&2
   if [[ -z "$search_results" || ! "$search_results" =~ \"items\" ]]; then
+    echo -e "${C6}>>> Search failed after retries${C0}" >&2
     logMessage "ERROR" "Search failed after $SEARCH_RETRIES attempts"
     return 1
   fi
   
+  # Debug: Check if we have valid JSON
+  echo -e "${C6}>>> Validating JSON response${C0}" >&2
+  if ! echo "$search_results" | jq empty 2>/dev/null; then
+    echo -e "${C6}>>> Invalid JSON received${C0}" >&2
+    logMessage "ERROR" "Invalid JSON received from Google Custom Search API"
+    logMessage "DEBUG" "Raw API response (first 500 chars): ${search_results:0:500}"
+    return 1
+  fi
+  echo -e "${C6}>>> JSON validation passed${C0}" >&2
+  
   # Validate and filter results
+  echo -e "${C6}>>> Filtering search results${C0}" >&2
   local filtered_results
   filtered_results=$(echo "$search_results" | jq -r '.items[]? | select(.link | test("(amazon\\.com|goodreads\\.com|audible\\.com)")) | {title: .title, link: .link, snippet: .snippet}' 2>/dev/null)
+  echo -e "${C6}>>> Filtering completed${C0}" >&2
   
   if [[ -z "$filtered_results" ]]; then
+    echo -e "${C6}>>> No filtered results found${C0}" >&2
     logMessage "WARN" "No valid results found from allowed sources"
+    logMessage "DEBUG" "Raw search results: $search_results"
+    # Try to extract any results without filtering
+    local any_results
+    any_results=$(echo "$search_results" | jq -r '.items[]? | {title: .title, link: .link, snippet: .snippet}' 2>/dev/null)
+    if [[ -n "$any_results" ]]; then
+      logMessage "INFO" "Found results but none from allowed sources (Amazon, Goodreads, Audible)"
+      echo "$any_results"
+      return 0
+    fi
     return 1
   fi
   
-  echo "$filtered_results"
+  echo -e "${C6}>>> Returning filtered results${C0}" >&2
+  } >&2  # Send all debug output to stderr
+  echo "$filtered_results"  # Only this goes to stdout
   return 0
 }
 
@@ -142,7 +216,9 @@ downloadAndScrapeBookPage()
   
   # Create temporary file for HTML content
   local temp_html_file
-  temp_html_file=$(mktemp "${tmpDir:-/tmp}/ccab.scrape.XXXXXX")
+  local temp_base_dir="${tmpDir:-/tmp}"
+  temp_base_dir="${temp_base_dir%/}"  # Remove trailing slash
+  temp_html_file=$(mktemp "${temp_base_dir}/ccab.scrape.XXXXXX")
   
   # Download using existing function
   if downloadBookPage "$book_url" "$temp_html_file"; then
@@ -396,8 +472,11 @@ parseBookAuthor()
     author=$(echo "$author" | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
     
     if [[ -n "$author" ]]; then
-      bookAuthors[$book_index]="$author"
-      logMessage "INFO" "Parsed author: $author"
+      # Extract only the primary author, removing co-authors
+      local primary_author
+      primary_author=$(extractPrimaryAuthor "$author")
+      bookAuthors[$book_index]="$primary_author"
+      logMessage "INFO" "Parsed primary author: $primary_author (from: $author)"
       return 0
     fi
   fi
@@ -405,6 +484,30 @@ parseBookAuthor()
   logMessage "WARN" "Could not parse book author"
   bookAuthors[$book_index]="Unknown Author"
   return 1
+}
+
+# Extract primary author only (remove co-authors)
+extractPrimaryAuthor()
+{
+  local author_string="$1"
+  local primary_author=""
+  
+  if [[ -z "$author_string" ]]; then
+    echo ""
+    return 1
+  fi
+  
+  # Remove co-authors using common separators
+  # Handles: "Author1 & Author2", "Author1 and Author2", "Author1, Author2", "Author1 with Author2"
+  # Also handles "Author1; Author2" and "Author1 | Author2"
+  primary_author=$(echo "$author_string" | sed -E 's/[[:space:]]*(&|and|,|with|;|\|)[[:space:]].*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  
+  # If the result is empty, return the original
+  if [[ -z "$primary_author" ]]; then
+    primary_author="$author_string"
+  fi
+  
+  echo "$primary_author"
 }
 
 # Parse book series information
@@ -562,9 +665,11 @@ initializeParser()
   local missing_deps=()
   
   # Initialize temporary file paths
-  tempHtmlFile=$(mktemp "${tmpDir:-/tmp}/ccab.html.XXXXXX")
-  tempInfoFile=$(mktemp "${tmpDir:-/tmp}/ccab.info.XXXXXX")
-  tempRichFile=$(mktemp "${tmpDir:-/tmp}/ccab.rich.XXXXXX")
+  local temp_base_dir="${tmpDir:-/tmp}"
+  temp_base_dir="${temp_base_dir%/}"  # Remove trailing slash
+  tempHtmlFile=$(mktemp "${temp_base_dir}/ccab.html.XXXXXX")
+  tempInfoFile=$(mktemp "${temp_base_dir}/ccab.info.XXXXXX")
+  tempRichFile=$(mktemp "${temp_base_dir}/ccab.rich.XXXXXX")
   
   # Set up cleanup for temporary files
   trap 'rm -f "$tempHtmlFile" "$tempInfoFile" "$tempRichFile" 2>/dev/null' EXIT
@@ -581,33 +686,117 @@ searchAndParseBook()
   
   logMessage "INFO" "Starting book search and parse for: $search_query"
   
-  # Perform search
-  local search_results
-  search_results=$(searchBooks "$search_query" 5)
-  
-  if [[ -z "$search_results" ]]; then
-    logMessage "ERROR" "No search results found"
-    return 1
-  fi
-  
-  # Present results to user (if interactive)
+  # Search loop to handle new search requests
+  local current_search="$search_query"
   local selected_url=""
-  if [[ "$interactive" == "true" ]]; then
-    selected_url=$(presentSearchResults "$search_results")
-  else
-    # Auto-select first result
-    selected_url=$(echo "$search_results" | jq -r '.link' | head -1)
-  fi
+  
+  while [[ -z "$selected_url" ]]; do
+    # Perform search with progress indication
+    echo -e "${C6}>>> Performing Google search (timeout: ${SEARCH_TIMEOUT}s)...${C0}"
+    local search_results
+    echo -e "${C6}>>> Calling searchBooks function...${C0}" >&2
+    if ! search_results=$(searchBooks "$current_search" 5); then
+      echo -e "${C6}>>> searchBooks function failed${C0}" >&2
+      logMessage "ERROR" "Search timed out or failed for: $current_search"
+      if [[ "$interactive" == "true" ]]; then
+        echo -e "${C3}>>> Search failed. Options:${C0}"
+        echo -e "${C3}>>> 1. Try a different search term${C0}"
+        echo -e "${C3}>>> 2. Manually provide book.html file${C0}"
+        echo -n "Enter new search term (or press Enter to give up): "
+        read -r new_search
+        if [[ -n "$new_search" ]]; then
+          current_search="$new_search"
+          continue
+        fi
+      fi
+      return 1
+    fi
+    
+    echo -e "${C6}>>> searchBooks function returned successfully${C0}" >&2
+    if [[ -z "$search_results" ]]; then
+      echo -e "${C6}>>> Search results are empty${C0}" >&2
+      logMessage "ERROR" "No search results found for: $current_search"
+      if [[ "$interactive" == "true" ]]; then
+        echo -n "Try different search term? Enter new term (or press Enter to give up): "
+        read -r new_search
+        if [[ -n "$new_search" ]]; then
+          current_search="$new_search"
+          continue
+        fi
+      fi
+      return 1
+    fi
+    
+    echo -e "${C6}>>> Search results received, preparing to present${C0}" >&2
+    # Present results to user (if interactive)
+    if [[ "$interactive" == "true" ]]; then
+      echo -e "${C6}>>> Calling presentSearchResults...${C0}" >&2
+      local user_selection
+      user_selection=$(presentSearchResults "$search_results")
+      local selection_result=$?
+      
+      if [[ $selection_result -eq 2 ]]; then
+        # User requested new search
+        current_search="${user_selection#SEARCH:}"
+        logMessage "INFO" "Performing new search with: $current_search"
+        continue
+      elif [[ $selection_result -eq 0 ]]; then
+        selected_url="$user_selection"
+      else
+        logMessage "ERROR" "Failed to get user selection"
+        return 1
+      fi
+    else
+      # Auto-select first result
+      selected_url=$(echo "$search_results" | jq -r '.link' | head -1)
+    fi
+  done
   
   if [[ -z "$selected_url" ]]; then
     logMessage "ERROR" "No URL selected"
     return 1
   fi
   
-  # Download and parse book page
-  if ! downloadBookPage "$selected_url" "$tempHtmlFile"; then
-    logMessage "ERROR" "Failed to download book page"
-    return 1
+  # Check for existing book.html file first
+  local html_source=""
+  if [[ -f "/tmp/book.html" ]]; then
+    logMessage "INFO" "Using provided book.html file"
+    mv "/tmp/book.html" "$tempHtmlFile"
+    html_source="provided"
+  else
+    # Attempt automatic download first
+    logMessage "INFO" "Attempting automatic download of: $selected_url"
+    if downloadBookPage "$selected_url" "$tempHtmlFile"; then
+      html_source="automatic"
+    else
+      # Automatic download failed - prompt for manual download
+      if [[ "$interactive" == "true" ]]; then
+        echo
+        echo -e "${C3}>>> Automatic download failed (likely due to CAPTCHA protection)${C0}"
+        echo -e "${C3}>>> Manual download required:${C0}"
+        echo -e "${C3}>>> 1. Open this URL in your web browser:${C0}"
+        echo -e "${C3}>>>    $selected_url${C0}"
+        echo -e "${C3}>>> 2. Save the complete webpage as HTML file${C0}"
+        echo -e "${C3}>>> 3. Copy the file to: /tmp/book.html${C0}"
+        echo
+        echo -n "Press Enter when you have saved the file..."
+        read -r
+        
+        # Check if user saved the file
+        if [[ -f "/tmp/book.html" ]]; then
+          mv "/tmp/book.html" "$tempHtmlFile"
+          mv "/tmp/book.html" "$workDir/book.html"  # Keep for reference
+          html_source="manual"
+          logMessage "INFO" "Using manually downloaded book.html file"
+        else
+          logMessage "ERROR" "No book.html file found at /tmp/book.html"
+          return 1
+        fi
+      else
+        logMessage "ERROR" "Failed to download book page and not in interactive mode"
+        return 1
+      fi
+    fi
   fi
   
   # Extract structured information
@@ -633,49 +822,118 @@ presentSearchResults()
 {
   local search_results="$1"
   
-  echo -e "${C2}>>> Search Results:${C0}"
-  echo
+  echo -e "${C2}>>> Search Results:${C0}" >&2
+  echo >&2
   
   local count=1
   local urls=()
   
-  # Display results
+  # Parse JSON results properly - each result is a complete JSON object
+  local json_objects
+  json_objects=$(echo "$search_results" | jq -c '.' 2>/dev/null)
+  
   while IFS= read -r result; do
-    if [[ -n "$result" ]]; then
+    if [[ -n "$result" && "$result" =~ ^\{.*\}$ ]]; then
       local title link
-      title=$(echo "$result" | jq -r '.title // "No title"')
-      link=$(echo "$result" | jq -r '.link // ""')
+      # Safely parse JSON with error handling
+      if ! title=$(echo "$result" | jq -r '.title // "No title"' 2>/dev/null); then
+        title="Unknown Title"
+      fi
+      
+      if ! link=$(echo "$result" | jq -r '.link // ""' 2>/dev/null); then
+        continue
+      fi
       
       if [[ -n "$link" ]]; then
         urls+=("$link")
-        echo -e "${C3}$count.${C0} $title"
-        echo -e "   ${C7}$link${C0}"
-        echo
+        echo -e "${C3}$count.${C0} $title" >&2
+        echo -e "   ${C8}$link${C0}" >&2
+        echo >&2
         ((count++))
       fi
     fi
-  done <<< "$search_results"
+  done <<< "$json_objects"
   
   if [[ ${#urls[@]} -eq 0 ]]; then
     logMessage "ERROR" "No valid URLs found in search results"
-    return 1
+    logMessage "DEBUG" "Raw search results: $search_results"
+    echo -e "${C1}>>> No valid search results found from Amazon, Goodreads, or Audible${C0}" >&2
+    echo -e "${C3}Options:${C0}" >&2
+    echo -e "${C3}  0: Enter a manual URL${C0}" >&2
+    echo -e "${C3}  s: Search again with different criteria${C0}" >&2
+    echo >&2
+    
+    local selection=""
+    while true; do
+      echo -n "Your choice: " >&2
+      read -r selection
+      
+      # Handle manual URL entry
+      if [[ "$selection" == "0" ]]; then
+        echo -n "Enter the book URL: " >&2
+        read -r manual_url
+        if [[ -n "$manual_url" ]]; then
+          echo "$manual_url"
+          return 0
+        else
+          echo -e "${C1}No URL entered. Please try again.${C0}" >&2
+        fi
+      # Handle new search
+      elif [[ "$selection" =~ ^[Ss]$ ]]; then
+        echo -n "Enter new search terms: " >&2
+        read -r new_search
+        if [[ -n "$new_search" ]]; then
+          echo "SEARCH:$new_search"
+          return 2
+        else
+          echo -e "${C1}No search terms entered. Please try again.${C0}" >&2
+        fi
+      else
+        echo -e "${C1}Invalid selection. Please choose 0 or s.${C0}" >&2
+      fi
+    done
   fi
+  # Enhanced user selection with additional options
+  echo -e "${C3}Options:${C0}" >&2
+  echo -e "${C3}  1-${#urls[@]}: Select from search results above${C0}" >&2
+  echo -e "${C3}  0: Enter a manual URL${C0}" >&2
+  echo -e "${C3}  s: Search again with different criteria${C0}" >&2
+  echo >&2
   
-  # Get user selection
   local selection=""
-  while [[ ! "$selection" =~ ^[1-9][0-9]*$ ]] || [[ $selection -gt ${#urls[@]} ]]; do
-    echo -n "Select a result (1-${#urls[@]}): "
+  while true; do
+    echo -n "Your choice: " >&2
     read -r selection
     
+    # Handle numeric selections
     if [[ "$selection" =~ ^[1-9][0-9]*$ ]] && [[ $selection -le ${#urls[@]} ]]; then
-      break
+      echo "${urls[$((selection-1))]}"
+      return 0
+    # Handle manual URL entry
+    elif [[ "$selection" == "0" ]]; then
+      echo -n "Enter the book URL: " >&2
+      read -r manual_url
+      if [[ -n "$manual_url" ]]; then
+        echo "$manual_url"
+        return 0
+      else
+        echo -e "${C1}No URL entered. Please try again.${C0}" >&2
+      fi
+    # Handle new search
+    elif [[ "$selection" =~ ^[Ss]$ ]]; then
+      echo -n "Enter new search terms: " >&2
+      read -r new_search
+      if [[ -n "$new_search" ]]; then
+        # Return special code to indicate new search requested
+        echo "SEARCH:$new_search"
+        return 2
+      else
+        echo -e "${C1}No search terms entered. Please try again.${C0}" >&2
+      fi
+    else
+      echo -e "${C1}Invalid selection. Please choose 1-${#urls[@]}, 0, or s.${C0}" >&2
     fi
-    
-    echo -e "${C1}Invalid selection. Please choose 1-${#urls[@]}.${C0}"
   done
-  
-  echo "${urls[$((selection-1))]}"
-  return 0
 }
 
 # Get parsed book information
@@ -745,6 +1003,7 @@ if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   export -f parseAdditionalMetadata
   export -f extractCoverArt
   export -f initializeParser
+  export -f extractPrimaryAuthor
   export -f searchAndParseBook
   export -f presentSearchResults
   export -f getBookInfo

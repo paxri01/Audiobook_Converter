@@ -85,6 +85,30 @@ detectSiteType()
 ## Amazon-specific Parsing Functions
 ##
 
+# Extract primary author only (remove co-authors)
+extractPrimaryAuthor()
+{
+  local author_string="$1"
+  local primary_author=""
+  
+  if [[ -z "$author_string" ]]; then
+    echo ""
+    return 1
+  fi
+  
+  # Remove co-authors using common separators
+  # Handles: "Author1 & Author2", "Author1 and Author2", "Author1, Author2", "Author1 with Author2"
+  # Also handles "Author1; Author2" and "Author1 | Author2"
+  primary_author=$(echo "$author_string" | sed -E 's/[[:space:]]*(&|and|,|with|;|\|)[[:space:]].*//' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+  
+  # If the result is empty, return the original
+  if [[ -z "$primary_author" ]]; then
+    primary_author="$author_string"
+  fi
+  
+  echo "$primary_author"
+}
+
 # Extract metadata from Amazon's rich product information
 extractAmazonRichInfo()
 {
@@ -175,7 +199,14 @@ extractAmazonRichInfo()
       author=$(echo "$rich_section" | sed -n '/audiobook_details-author/,/\/li>/p' | grep -o '[A-Z][a-z]* [A-Z][a-z]*' | head -1)
     fi
     
-    SCRAPED_AUTHORS[$output_index]="$author"
+    # Extract only the primary author, removing co-authors
+    local primary_author
+    primary_author=$(extractPrimaryAuthor "$author")
+    SCRAPED_AUTHORS[$output_index]="$primary_author"
+    
+    if [[ "$author" != "$primary_author" ]]; then
+      logMessage "DEBUG" "Primary author extracted: '$primary_author' (from: '$author')"
+    fi
     
     # Extract narrator information - improved generic pattern
     local narrator=""
@@ -279,7 +310,9 @@ parseAmazonFormat()
   if [[ -z "${SCRAPED_AUTHORS[$output_index]}" ]]; then
     local alt_author=""
     alt_author=$(grep -i 'by:' "$html_file" | sed 's/.*by:[[:space:]]*//' | sed 's/<.*//' | head -1)
-    SCRAPED_AUTHORS[$output_index]="$alt_author"
+    local primary_alt_author
+    primary_alt_author=$(extractPrimaryAuthor "$alt_author")
+    SCRAPED_AUTHORS[$output_index]="$primary_alt_author"
   fi
   
   logMessage "INFO" "Amazon format parsing completed"
@@ -312,7 +345,10 @@ parseGoodreadsFormat()
   if [[ -z "$author" ]]; then
     author=$(grep -A5 'authorName' "$html_file" | grep -o '>[^<]*<' | sed 's/[><]//g' | head -1)
   fi
-  SCRAPED_AUTHORS[$output_index]="$author"
+  # Extract only the primary author, removing co-authors
+  local primary_author
+  primary_author=$(extractPrimaryAuthor "$author")
+  SCRAPED_AUTHORS[$output_index]="$primary_author"
   
   # Extract rating
   local rating=""
@@ -356,7 +392,10 @@ parseAudibleFormat()
   # Extract author
   local author=""
   author=$(grep -i 'data-asin' "$html_file" | grep -A10 'author' | grep -o 'title="[^"]*"' | sed 's/title="\([^"]*\)"/\1/' | head -1)
-  SCRAPED_AUTHORS[$output_index]="$author"
+  # Extract only the primary author, removing co-authors
+  local primary_author
+  primary_author=$(extractPrimaryAuthor "$author")
+  SCRAPED_AUTHORS[$output_index]="$primary_author"
   
   # Extract narrator
   local narrator=""
@@ -437,7 +476,9 @@ extractStructuredData()
     fi
     
     if [[ -z "${SCRAPED_AUTHORS[$output_index]}" && -n "$book_author" ]]; then
-      SCRAPED_AUTHORS[$output_index]="$book_author"
+      local primary_book_author
+      primary_book_author=$(extractPrimaryAuthor "$book_author")
+      SCRAPED_AUTHORS[$output_index]="$primary_book_author"
     fi
     
     if [[ -z "${SCRAPED_PUBLISHERS[$output_index]}" && -n "$book_publisher" ]]; then
@@ -699,6 +740,7 @@ initializeWebScraper()
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   # Script is being sourced
   export -f detectSiteType
+  export -f extractPrimaryAuthor
   export -f extractAmazonRichInfo
   export -f parseAmazonFormat
   export -f parseGoodreadsFormat

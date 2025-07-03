@@ -170,19 +170,8 @@ update_script_paths() {
     sed -i "s|local module_path=\"\$SCRIPT_DIR/lib/\$module\"|local module_path=\"$INSTALL_DIR/lib/\$module\"|g" "$INSTALL_DIR/bin/ccab"
     
     # Update configuration search paths in config module to prioritize system config
-    local config_paths=(
-        "\"$CONFIG_DIR/ccab.conf\""
-        "\"$HOME/.config/ccab/ccab.conf\""
-        "\"/etc/ccab/ccab.conf\""
-    )
-    
-    # Replace the config_paths array in the config module
-    sed -i "/config_paths=(/,/)/c\\
-  config_paths=(\\
-    ${config_paths[0]}\\
-    ${config_paths[1]}\\
-    ${config_paths[2]}\\
-  )" "$INSTALL_DIR/lib/ccab-config.sh"
+    # Simply replace the first path to prioritize system config
+    sed -i 's#"/ccab.conf"#"/etc/ccab/ccab.conf"#' "$INSTALL_DIR/lib/ccab-config.sh"
     
     print_status "INFO" "Script paths updated successfully"
 }

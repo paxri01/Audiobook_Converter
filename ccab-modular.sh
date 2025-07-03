@@ -64,20 +64,20 @@ logMessage()
   
   case "$level" in
     "INFO")
-      echo -e "${C2}[$timestamp] INFO: $message${C0}"
+      echo -e "[$timestamp] ${C2}INFO:${C0} $message"
       ;;
     "WARN")
-      echo -e "${C3}[$timestamp] WARN: $message${C0}"
+      echo -e "[$timestamp] ${C3}WARN:${C0} $message"
       ;;
     "ERROR")
-      echo -e "${C1}[$timestamp] ERROR: $message${C0}"
+      echo -e "[$timestamp] ${C1}ERROR:${C0} $message"
       ;;
     "TRACE")
       echo -e "${C8}[$timestamp] TRACE: $message${C0}"
       ;;
     "DEBUG")
       if [[ "${debug:-false}" == "true" ]]; then
-        echo -e "${C6}[$timestamp] DEBUG: $message${C0}"
+        echo -e "[$timestamp] ${C6}DEBUG:${C0} $message"
       fi
       ;;
   esac
@@ -96,7 +96,7 @@ searchType="all"
 debug=false
 cuda="auto"
 targetDir="$PWD"
-lookupMetadata=false
+lookupMetadata=true
 interactive=true
 skipExisting=false
 
@@ -285,9 +285,24 @@ performMetadataLookup()
       continue
     fi
     
-    # Generate search query from filename
-    search_query=$(generateSearchQuery "$current_file")
-    echo -e "${C6}>>> Generated search query: '$search_query'${C0}"
+    # Extract metadata first to get title/artist for better search query
+    if extractMetadata "${inFiles[$i]}" "$i"; then
+      # Use extracted metadata if available
+      if [[ -n "${bookTitles[$i]:-}" && -n "${bookAuthors[$i]:-}" ]]; then
+        search_query="${bookTitles[$i]} ${bookAuthors[$i]}"
+        echo -e "${C6}>>> Generated search query from metadata: '$search_query'${C0}"
+      elif [[ -n "${bookTitles[$i]:-}" ]]; then
+        search_query="${bookTitles[$i]}"
+        echo -e "${C6}>>> Generated search query from title: '$search_query'${C0}"
+      else
+        search_query=$(generateSearchQuery "$current_file")
+        echo -e "${C6}>>> Generated search query from filename: '$search_query'${C0}"
+      fi
+    else
+      # Fall back to filename if metadata extraction fails
+      search_query=$(generateSearchQuery "$current_file")
+      echo -e "${C6}>>> Generated search query from filename: '$search_query'${C0}"
+    fi
     
     if [[ -z "$search_query" ]]; then
       echo -e "${C1}>>> Error: Could not generate search query${C0}"
@@ -490,9 +505,6 @@ main()
     exit 1
   fi
   
-  # Show file statistics
-  getFileStats
-  
   # Probe all files (arrays are populated by getFiles and probeFile functions)
   #shellcheck disable=SC2154
   local file_count=${#inFiles[@]}
@@ -507,6 +519,9 @@ main()
   done
   
   echo -e "${C2}>>> File analysis complete${C0}"
+  
+  # Show file statistics after probing
+  getFileStats
   
   # Validate file arrays after probing
   if ! validateFileArrays; then
@@ -528,42 +543,32 @@ main()
   fi
   
   logMessage "INFO" "$needs_processing files need processing"
-  
-  # Perform metadata lookup if requested
-  if [[ "$lookupMetadata" == "true" ]]; then
-    # Prompt for book.html download if interactive mode
-    if [[ "$interactive" == "true" ]]; then
-      echo
-      echo -e "${C3}>>> Metadata Lookup Mode Enabled${C0}"
-      echo -e "${C3}>>> For best results, you can provide a pre-downloaded book.html file${C0}"
-      echo -e "${C3}>>> from Amazon, Goodreads, or Audible with book details.${C0}"
-      echo
-      echo -n "Do you have a book.html file to use? [y/N]: "
-      read -r response
-      
-      if [[ "$response" =~ ^[Yy] ]]; then
-        echo -n "Enter path to book.html file: "
-        read -r html_file_path
-        
-        if [[ -f "$html_file_path" && -r "$html_file_path" ]]; then
-          # Copy the HTML file to working directory for processing
-          #shellcheck disable=SC2154
-          cp "$html_file_path" "$workDir/book.html" || {
-            echo -e "${C1}>>> Error: Could not copy HTML file${C0}"
-          }
-          echo -e "${C2}>>> Using provided book.html file for metadata extraction${C0}"
-        else
-          echo -e "${C1}>>> Error: File not found or not readable: $html_file_path${C0}"
-          echo -e "${C3}>>> Continuing with automatic search instead${C0}"
-        fi
-      else
-        echo -e "${C3}>>> Continuing with automatic online search${C0}"
-      fi
-      echo
+
+  # Check for existing book.html file first
+  if [[ -f "/tmp/book.html" ]]; then
+    logMessage 'INFO' "Found existing /tmp/book.html, skipping metadata lookup"
+    # Move file to working directory
+    local target_dir="${workDir:-/tmp/ccab}"
+    if [[ ! -d "$target_dir" ]]; then
+      target_dir="/tmp/ccab"
+      mkdir -p "$target_dir" || {
+        logMessage "ERROR" "Cannot create target directory: $target_dir"
+        exit 1
+      }
     fi
     
+    if cp "/tmp/book.html" "$target_dir/book.html"; then
+      logMessage "INFO" "book.html moved to $target_dir/book.html"
+      rm -f "/tmp/book.html"  # Clean up original
+    else
+      logMessage "ERROR" "Failed to move book.html to working directory"
+      exit 1
+    fi
+  elif [[ "$lookupMetadata" == "true" ]]; then
+    # Perform metadata lookup if requested
     performMetadataLookup "$file_count"
   fi
+  
   
   # Show processing summary
   echo -e "${C2}>>> Processing Summary:${C0}"
@@ -581,6 +586,16 @@ main()
   echo -e "${C2}>>> Starting audiobook processing workflow${C0}"
   echo
   
+  # Convert moveOpt to bookType to avoid genre prompting
+  if [[ -n "${moveOpt:-}" && "$move" == "true" ]]; then
+    if bookType=$(getGenreDirectory "$moveOpt" 2>/dev/null); then
+      export bookType
+      logMessage "INFO" "Genre automatically set to: $bookType (from -m $moveOpt)"
+    else
+      logMessage "WARN" "Invalid move option '$moveOpt', will prompt for genre selection"
+    fi
+  fi
+  
   # Set up processing options
   local processing_options=""
   if [[ "$concat" == "true" ]]; then
@@ -594,6 +609,17 @@ main()
   fi
   if [[ "$interactive" == "false" ]]; then
     processing_options="$processing_options --no-interactive"
+  fi
+  
+  # Verify and edit metadata for each file
+  if [[ "${interactive:-true}" == "true" ]]; then
+    verifyAndEditMetadata
+  fi
+  
+  # Show final processing confirmation
+  if ! showFinalConfirmation; then
+    logMessage "INFO" "Processing cancelled by user"
+    exit 0
   fi
   
   # Execute the main processing workflow
@@ -632,6 +658,221 @@ main()
   fi
   
   return $status
+}
+
+# Verify and edit metadata for each file individually
+verifyAndEditMetadata()
+{
+  local file_count=${#inFiles[@]}
+  
+  echo
+  echo -e "${C3}>>> Metadata Verification${C0}"
+  echo -e "${C3}=========================${C0}"
+  echo
+  
+  for ((i=0; i<file_count; i++)); do
+    if [[ $file_count -gt 1 ]]; then
+      echo -e "${C2}File $((i+1))/$file_count:${C0} $(basename "${inFiles[$i]}")"
+    else
+      echo -e "${C2}File:${C0} $(basename "${inFiles[$i]}")"
+    fi
+    echo
+    
+    # Verify Title
+    local current_title="${bookTitles[$i]:-Unknown Title}"
+    echo -e "${C2}Title:${C0} $current_title"
+    echo -n "Accept this title? [Y/n/edit]: "
+    read -r response
+    
+    case "$response" in
+      [Nn])
+        echo -n "Enter new title: "
+        read -r new_title
+        if [[ -n "$new_title" ]]; then
+          bookTitles[$i]="$new_title"
+          echo -e "${C2}Title updated to:${C0} $new_title"
+        fi
+        ;;
+      [Ee])
+        echo -n "Enter new title: "
+        read -r new_title
+        if [[ -n "$new_title" ]]; then
+          bookTitles[$i]="$new_title"
+          echo -e "${C2}Title updated to:${C0} $new_title"
+        fi
+        ;;
+      *)
+        # If user typed something other than Y/n/edit, treat it as the new title
+        if [[ -n "$response" && ! "$response" =~ ^[Yy]$ ]]; then
+          bookTitles[$i]="$response"
+          echo -e "${C2}Title updated to:${C0} $response"
+        fi
+        ;;
+    esac
+    echo
+    
+    # Verify Series
+    local current_series="${bookSeries[$i]:-}"
+    local current_series_number="${bookSeriesNumbers[$i]:-}"
+    local series_display=""
+    
+    if [[ -n "$current_series" ]]; then
+      if [[ -n "$current_series_number" ]]; then
+        series_display="$current_series #$current_series_number"
+      else
+        series_display="$current_series"
+      fi
+    else
+      series_display="None"
+    fi
+    
+    echo -e "${C2}Series:${C0} $series_display"
+    echo -n "Accept this series? [Y/n/edit]: "
+    read -r response
+    
+    case "$response" in
+      [Nn])
+        echo -n "Enter new series name (or leave blank for none): "
+        read -r new_series
+        echo -n "Enter series number (or leave blank for none): "
+        read -r new_series_number
+        bookSeries[$i]="$new_series"
+        if [[ -n "$new_series_number" && "$new_series_number" =~ ^[0-9]+$ ]]; then
+          bookSeriesNumbers[$i]=$(printf "%02d" "$new_series_number")
+        else
+          bookSeriesNumbers[$i]=""
+        fi
+        if [[ -n "$new_series" ]]; then
+          echo -e "${C2}Series updated to:${C0} $new_series${bookSeriesNumbers[$i]:+ #${bookSeriesNumbers[$i]}}"
+        else
+          echo -e "${C2}Series updated to:${C0} None"
+        fi
+        ;;
+      [Ee])
+        echo -n "Enter new series name (or leave blank for none): "
+        read -r new_series
+        echo -n "Enter series number (or leave blank for none): "
+        read -r new_series_number
+        bookSeries[$i]="$new_series"
+        if [[ -n "$new_series_number" && "$new_series_number" =~ ^[0-9]+$ ]]; then
+          bookSeriesNumbers[$i]=$(printf "%02d" "$new_series_number")
+        else
+          bookSeriesNumbers[$i]=""
+        fi
+        if [[ -n "$new_series" ]]; then
+          echo -e "${C2}Series updated to:${C0} $new_series${bookSeriesNumbers[$i]:+ #${bookSeriesNumbers[$i]}}"
+        else
+          echo -e "${C2}Series updated to:${C0} None"
+        fi
+        ;;
+    esac
+    echo
+    
+    # Verify Author
+    local current_author="${bookAuthors[$i]:-Unknown Author}"
+    echo -e "${C2}Author:${C0} $current_author"
+    echo -n "Accept this author? [Y/n/edit]: "
+    read -r response
+    
+    case "$response" in
+      [Nn])
+        echo -n "Enter new author: "
+        read -r new_author
+        if [[ -n "$new_author" ]]; then
+          bookAuthors[$i]="$new_author"
+          echo -e "${C2}Author updated to:${C0} $new_author"
+        fi
+        ;;
+      [Ee])
+        echo -n "Enter new author: "
+        read -r new_author
+        if [[ -n "$new_author" ]]; then
+          bookAuthors[$i]="$new_author"
+          echo -e "${C2}Author updated to:${C0} $new_author"
+        fi
+        ;;
+      *)
+        # If user typed something other than Y/n/edit, treat it as the new author name
+        if [[ -n "$response" && ! "$response" =~ ^[Yy]$ ]]; then
+          bookAuthors[$i]="$response"
+          echo -e "${C2}Author updated to:${C0} $response"
+        fi
+        ;;
+    esac
+    echo
+    
+    # Show final summary for this file
+    echo -e "${C3}Final metadata for this file:${C0}"
+    echo -e "${C2}  Title:${C0} ${bookTitles[$i]}"
+    echo -e "${C2}  Author:${C0} ${bookAuthors[$i]}"
+    local final_series=""
+    if [[ -n "${bookSeries[$i]}" ]]; then
+      final_series="${bookSeries[$i]}${bookSeriesNumbers[$i]:+ #${bookSeriesNumbers[$i]}}"
+    else
+      final_series="None"
+    fi
+    echo -e "${C2}  Series:${C0} $final_series"
+    echo
+  done
+  
+  return 0
+}
+
+# Display final processing confirmation
+showFinalConfirmation()
+{
+  local file_count=${#inFiles[@]}
+  
+  echo -e "${C3}>>> Final Processing Summary${C0}"
+  echo -e "${C3}============================${C0}"
+  echo
+  
+  for ((i=0; i<file_count; i++)); do
+    if [[ $file_count -gt 1 ]]; then
+      echo -e "${C2}File $((i+1))/$file_count:${C0} $(basename "${inFiles[$i]}")"
+    else
+      echo -e "${C2}File:${C0} $(basename "${inFiles[$i]}")"
+    fi
+    
+    echo -e "${C2}  Title:${C0} ${bookTitles[$i]}"
+    echo -e "${C2}  Author:${C0} ${bookAuthors[$i]}"
+    
+    local series_info=""
+    if [[ -n "${bookSeries[$i]:-}" ]]; then
+      if [[ -n "${bookSeriesNumbers[$i]:-}" ]]; then
+        series_info="${bookSeries[$i]} #${bookSeriesNumbers[$i]}"
+      else
+        series_info="${bookSeries[$i]}"
+      fi
+    else
+      series_info="None"
+    fi
+    echo -e "${C2}  Series:${C0} $series_info"
+    echo
+  done
+  
+  echo -e "${C2}Output filename format:${C0} Author - Series ## - Title.mp3"
+  if [[ "$move" == "true" ]]; then
+    echo -e "${C2}Files will be organized to:${C0} /audio/audiobooks/<Genre>/<Author>/<Series - Title>/"
+  fi
+  echo
+  
+  if [[ "${interactive:-true}" == "true" ]]; then
+    echo -n "Proceed with processing? [Y/n]: "
+    read -r response
+    
+    case "$response" in
+      [Yy]|"")
+        return 0
+        ;;
+      *)
+        echo -e "${C3}>>> Processing cancelled by user${C0}"
+        return 1
+        ;;
+    esac
+  fi
+  
+  return 0
 }
 
 # Execute main function if script is run directly

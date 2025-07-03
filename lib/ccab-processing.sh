@@ -29,6 +29,92 @@ PROCESSING_PHASE_CLEANUP=5
 # Module initialization flag
 CCAB_PROCESSING_INITIALIZED=false
 
+# Create done.txt file in source directory after successful processing
+createDoneFile()
+{
+  local index="$1"
+  local output_dir="$2"
+  
+  if [[ -z "$index" ]]; then
+    logMessage "ERROR" "createDoneFile: Index parameter required"
+    return 1
+  fi
+  
+  # Get source directory from original file path
+  local source_dir
+  source_dir=$(dirname "${inFiles[$index]}")
+  
+  if [[ ! -d "$source_dir" ]]; then
+    logMessage "ERROR" "createDoneFile: Source directory not found: $source_dir"
+    return 1
+  fi
+  
+  local done_file="$source_dir/done.txt"
+  local encode_date
+  encode_date=$(date '+%Y-%m-%d %H:%M:%S')
+  
+  # Create done.txt content
+  cat > "$done_file" << EOF
+Audiobook Processing Complete
+============================
+
+Source File: $(basename "${inFiles[$index]}")
+Output Directory: ${output_dir:-"Unknown"}
+Encode Date: $encode_date
+Processed by: ccab-audiobook-converter v4.0
+
+Author: ${bookAuthors[$index]:-"Unknown"}
+Title: ${bookTitles[$index]:-"Unknown"}
+Series: ${bookSeries[$index]:-"None"} ${bookSeriesNumbers[$index]:+#${bookSeriesNumbers[$index]}}
+EOF
+
+  if [[ -f "$done_file" ]]; then
+    logMessage "DEBUG" "Created done.txt file: $done_file"
+    return 0
+  else
+    logMessage "ERROR" "Failed to create done.txt file: $done_file"
+    return 1
+  fi
+}
+
+# Generate proper output filename: Author - Series ## - Title.mp3
+generateOutputFilename()
+{
+  local index="$1"
+  local output_filename=""
+  
+  if [[ -z "$index" ]]; then
+    logMessage "ERROR" "generateOutputFilename: Index parameter required"
+    return 1
+  fi
+  
+  # Get metadata components
+  local author="${bookAuthors[$index]:-Unknown Author}"
+  local title="${bookTitles[$index]:-Unknown Title}" 
+  local series="${bookSeries[$index]:-}"
+  local series_number="${bookSeriesNumbers[$index]:-}"
+  
+  # Clean filename components (remove invalid characters)
+  author=$(echo "$author" | tr -d '\000-\037\177' | sed 's/[<>:"|?*]/_/g')
+  title=$(echo "$title" | tr -d '\000-\037\177' | sed 's/[<>:"|?*]/_/g')
+  series=$(echo "$series" | tr -d '\000-\037\177' | sed 's/[<>:"|?*]/_/g')
+  
+  # Build filename: Author - Series ## - Title.mp3
+  if [[ -n "$series" ]]; then
+    if [[ -n "$series_number" ]]; then
+      output_filename="${author} - ${series} ${series_number} - ${title}.mp3"
+    else
+      output_filename="${author} - ${series} - ${title}.mp3"
+    fi
+  else
+    output_filename="${author} - ${title}.mp3"
+  fi
+  
+  logMessage "DEBUG" "Generated output filename: $output_filename"
+  echo "$output_filename"
+  return 0
+}
+
 # Initialize processing workflow module
 initializeProcessing()
 {
@@ -241,11 +327,6 @@ processMetadataPhase()
     fi
   done
   
-  # Second pass: Perform web scraping for missing metadata (if enabled)
-  if [[ "${lookupMetadata:-false}" == "true" ]]; then
-    logMessage "INFO" "Performing web-based metadata lookup"
-    performMetadataLookup "$processedFiles"
-  fi
   
   # Third pass: Prompt for any remaining missing metadata
   if [[ "${interactive:-true}" == "true" ]]; then
@@ -306,10 +387,17 @@ processAudioPhase()
       if checkFile "${inFiles[$i]}" "$i"; then
         needsEncoding[$i]="true"
         
-        # Generate output filename
-        local base_name
-        base_name=$(basename "${inFiles[$i]%.*}")
-        encoded_file="${workDir:-/tmp}/${base_name}.mp3"
+        # Generate proper output filename using metadata
+        local output_filename
+        if output_filename=$(generateOutputFilename "$i"); then
+          encoded_file="${workDir:-/tmp}/${output_filename}"
+        else
+          # Fallback to original basename if metadata is unavailable
+          local base_name
+          base_name=$(basename "${inFiles[$i]%.*}")
+          encoded_file="${workDir:-/tmp}/${base_name}.mp3"
+          logMessage "WARN" "Using fallback filename for: $(basename "${inFiles[$i]}")"
+        fi
         
         # Perform audio encoding
         logMessage "INFO" "Encoding: $(basename "${inFiles[$i]}")"
@@ -394,6 +482,15 @@ processOrganizationPhase()
         ((successfulFiles++))
         processingStatus[$i]="completed"
         logMessage "DEBUG" "Successfully organized: $(basename "${encodedFiles[$i]}")"
+        
+        # Create done.txt file in source directory after successful organization
+        local target_dir
+        target_dir=$(buildDirectoryPath "$i" 2>/dev/null)
+        if createDoneFile "$i" "$target_dir"; then
+          logMessage "DEBUG" "Created completion record for: $(basename "${inFiles[$i]}")"
+        else
+          logMessage "WARN" "Failed to create completion record for: $(basename "${inFiles[$i]}")"
+        fi
       else
         logMessage "ERROR" "Failed to organize: $(basename "${encodedFiles[$i]}")"
         processingErrors[$i]="Organization failed"
@@ -542,6 +639,8 @@ isProcessingComplete()
 # Export processing module functions for external use
 if [[ "${BASH_SOURCE[0]}" != "${0}" ]]; then
   # Module is being sourced, export functions
+  export -f createDoneFile
+  export -f generateOutputFilename
   export -f initializeProcessing
   export -f initializeProcessingState
   export -f processAudiobooks
