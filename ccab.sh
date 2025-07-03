@@ -103,7 +103,6 @@ concat=false
 debug=false
 move=false
 recurse=false
-#verify=false
 
 cleanUp()
 {
@@ -205,7 +204,6 @@ probeFile()
   probeFile="$workDir/$(basename "${inFile%.*}").probe"
   echo -e "${C8}>>> probing $(basename "$inFile")${C0}"
 
-  #set -x
   inFile="$1"
 
   if $debug; then
@@ -241,7 +239,6 @@ probeFile()
     _bookAuthor=${_tempAuthor:-$_bookAuthor}
   fi
 
-  #set +x
 
   _origBitrate=$(grep 'Audio:' "$probeFile" | awk -F', ' '{ print $5 }' | awk '{ print $1 }')
   if [[ $_origBitrate -gt $targetBitrate ]]; then
@@ -341,7 +338,7 @@ searchInfo()
         ;;
       0) # Manually enter book URL
         echo -e "\n  ${C6}Enter book URL: ${C0}\c"
-        read -r bookURL[$index]
+        read -r bookURL["$index"]
         ;;
       s|S) # New search criteria
         echo -e "\n Enter new search criteria: \c"
@@ -354,18 +351,17 @@ searchInfo()
     esac
   done
 
-  ## Retrieve book information
-  echo -e "${C8}\n>>> Retrieving book information...${C0}"
-  while [[ ! -s "$searchRaw" ]]; do
-    if $debug; then
-      echo -e "${C2}++curl -sL \"${bookURL[$index]}\" -o \"$searchRaw\"${C0}"
-    fi
-    curl -sL "${bookURL[$index]}" -o "$searchRaw"
-    sleep .5
+  ## Process manually downloaded book information
+  while [[ ! -r /tmp/book.html ]]; do
+    cat << EOF
+      ${C4}Due to Amazon blocking automated scraping with CAPTCHA, we need to maually
+      download the book information. Open a browser page to the Audible book page
+      and save the page as '/tmp/book.html' and press Enter to continue.${C0}
+EOF
+    read -r ANS
   done
 
-  ## Attempt to normalize html results
-  hxnormalize -l 9999 < "$searchRaw" > "$searchInfo" 2>/dev/null
+  mv /tmp/book.html "${workDir}/book.html"
 
   return 0
 }
@@ -376,35 +372,29 @@ parseInfo()
   ##       data.  Multiple methods are used to attempt to gather as much as
   ##       possible.
 
-  inFile='/tmp/book.html'
-  tmpInfo='/tmp/book.info'
-  richInfo="$workDir/rich_info.txt"
+  inFile="$workDir/book.html"
+  normalFile="$workDir/normalized.html"
   index=$2
 
-  if [[ -f "$inFile" ]]; then
-    grep 'rich_product_information' "/tmp/book.html" | hxnormalize | sed -r 's/^\s+>/<span>/g' |\
-      sed -rn 's/.*<span>(.[^<]*)<\/.*/\1/p' | grep -v '<.*>' > "$richInfo"
-  else
-    echo -e "${C5}ERROR:${C0} No html file found."
-    return 1
-  fi
+  # Normalize the book html page to allow for better parsing.
+  hxnormalize -l 9999 "$inFile" > "$normalFile"
 
-  _fullTitle=$(grep -m1 -A3 '<title>' "$inFile" | tr -d '\n' | sed -rn 's/<title>(.*)<\/title>.*/\1/p')
-  if [[ -z $_fullTitle ]]; then
-    _fullTitle=$(grep -m1 '<title ' "$inFile" | sed -rn 's/.*content=(.[^\/]*).*/\1/p' | tr -d '"')
-  fi
+  #if [[ -r "$inFile" ]]; then
+  #  grep 'rich_product_information' "$inFile" | hxnormalize -l 9999 > "$richInfo"
+  #else
+  #  echo -e "${C5}ERROR:${C0} Unable to read $inFile."
+  #  return 1
+  #fi
+
+  _fullTitle=$(grep -m 1 '<title>' "$normalFile" | sed -rn 's/.*<title>(.*)<\/title>/\1/p')
   _fullTitle=${_fullTitle//\&amp;/\&}
   _fullTitle=${_fullTitle//\&apos;/\'}
   _fullTitle=$(sed -r 's/&#4[0-1];//g' <<< "$_fullTitle")
+
   echo -e "${C2}_fullTitle: $_fullTitle${C0}"
   
-  grep 'ReleaseDate' "$inFile" | hxnormalize | sed '/^$/d' | sed '/href=/d' > "$tmpInfo"
-
   if [[ -z $_title ]]; then
-    _title=$(sed -rn 's/.*Amazon.com: (.[^,]*): .*Book.*/\1/p' <<< "$_fullTitle" |\
-      sed 's/ Audible Audio Edition//;  s/ (Audible Audio Edition)//' |\
-      sed 's/: A LitRPG Adventure//')
-      _title=${_title//\&#39;/\'}
+    _title=$(sed -'s/.*Amazon.com: //; s/ (Audible Audio Edition).*//; s/: .*LitRPG.*//' <<< "$_fullTitle")
   fi
 
   echo -e "${C3}Confirm book title: [${C0}${_title}${C3}]${C0} \c"
@@ -412,88 +402,85 @@ parseInfo()
   _title=${tmpTitle:-$_title}
   echo -e "${C2}_title: $_title${C0}"
 
-  _author=$(grep -A1 'Author' "$richInfo" | tail -1)
-  if [[ -z $_author ]]; then
-    _author=$(grep -A2 Author "$tmpInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
-  fi
+  _author=$(grep -m1 'Author:' "$normalFile" | sed -rn 's/.*Author: (.*)" class.*/\1/p' | sed 's/,.*//')
   echo -e "${C3}Confirm book author: [${C0}${_author}${C3}]${C0} \c"
   read -r tmpAuthor
   _author=${tmpAuthor:-$_author}
   echo -e "${C2}_author: $_author${C0}"
 
-  _seriesName=$(grep -A1 'Book [0-9]' "$richInfo" | tail -1)
-  if [[ -z $_seriesName ]]; then
-    _seriesName=$(sed -rn 's/.*: (.[^,]*), Book.*/\1/p' <<< "$_fullTitle")
+  _releaseDate=$(grep -A4 'Audible release date' "$normalFile" | tail -1 | sed -rn 's/.*<span>(.*)<\/span>.*/\1/p')
+  if [[ -z $_releaseDate ]]; then
+    _releaseDate="unknown"
+  else
+    _year=$(sed 's/.*, //' <<< "$_releaseDate")
   fi
+
+  _seriesName=$(grep -m 1 'Book [0-9] of ' "$normalFile" | sed -rn 's/.*: (.*) <\/a>.*/\1/p')
+  _seriesName=${_series//\&amp;/\&}
+  _seriesName=${_series//\&apos;/\'}
+  #_seriesName=${_series//\&#39;/\'}
+
+  if [[ -z $_seriesName ]]; then
+    _seriesName="$(sed -rn 's/.*- (.*) - .*/\1/p' <<< "$_fullTitle")"
+  fi
+
   echo -e "${C3}Confirm book series name: [${C0}${_seriesName}${C3}]${C0} \c"
   read -r tmpSeries
   _seriesName=${tmpSeries:-$_seriesName}
+  echo -e "${C2}_seriesName: $_seriesName${C0}"
 
-  _seriesNum=$(printf "%02d" "$(sed -rn 's/.*Book ([0-9]+).*/\1/p' "$richInfo")")
+  _seriesNum=$(printf "%02d" "$(grep -m 1 'Book [0-9] or' "$normalFile" | sed -rn 's/.*Book ([0-9]+).*/\1/p')")
   if [[ -z $_seriesNum ]]; then
-    _seriesNum=$(printf "%02d" "$(sed -rn 's/.*Book ([0-9]+).*/\1/p' <<< "$_fullTitle")")
+    _seriesNum="${_year:-'00'}"
   fi
+
   echo -e "${C3}Confirm series number: [${C0}${_seriesNum}${C3}]${C0} \c"
   read -r tmpNum
   _seriesNum=${tmpNum:-$_seriesNum}
 
   _series="$_seriesName $_seriesNum"
-  _series=${_series//\&amp;/\&}
-  _series=${_series//\&apos;/\'}
-  _series=${_series//\&#39;/\'}
   echo -e "${C2}_series: $_series${C0}"
 
-  _narrator=$(grep -A1 'Narrator' "$richInfo" | tail -1)
+  _narrator=$(grep -A4 'Narrator' "$normalFile" | grep 'celwidget' | tail -1 | sed -rn 's/.*<span>(.*)<\/span>.*/\1/p')
   if [[ -z $_narrator ]]; then
-    _narrator=$(grep -A2 Narrator "$tmpInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
+    _narrator='unknown'
   fi 
   echo -e "${C2}_narrator: $_narrator${C0}"
 
-  _publisher=$(grep -A1 'Publisher' "$richInfo" | tail -1)
+  _publisher=$(grep -A4 'Publisher' "$normalFile" | grep 'celwidget' | tail -1 | sed -rn 's/.*<span>(.*)<\/span>.*/\1/p')
   if [[ -z $_publisher ]]; then
-    _publisher=$(grep -A2 Publisher "$tmpInfo" | tail -1 | sed -rn 's/.*>(.*)<.*/\1/p')
+    _publisher='unknown'
   fi
   echo -e "${C2}_publisher: $_publisher${C0}"
 
-  _pubDate=$(grep -A1 'Audible release date' "$richInfo" | tail -1)
-  if [[ -z $_pubDate ]]; then
-    _pubDate=$(grep -A3 ReleaseDate "$tmpInfo" | tail -1 | sed -rn 's/.*<span>(.*)<\/span>/\1/p')
-  fi
-  echo -e "${C2}_date: $_date${C0}"
-
-  _ASIN=$(grep -A1 'ASIN' "$richInfo" | tail -1)
+  _ASIN=$(grep -m1 'ASIN=' "$normalFile" | sed -rn 's/.*ASIN=(.*)">.*/\1/p')
   if [[ -z $_ASIN ]]; then
-    _ASIN=$(grep -A1 ASIN "$tmpInfo" | tail -1 | sed -rn 's/.*<span>(.*)<\/span>/\1/p')
+    _ASIN='unknown'
   fi
   echo -e "${C2}_ASIN: $_ASIN${C0}"
 
-  _length=$(grep -A1 'Listening Length' "$richInfo" | tail -1)
+  _length=$(grep -m1 -A4 'Listening Length' "$normalFile" | tail -1 | sed -rn 's/.*<span>(.*)<\/span>.*/\1/p')
   if [[ -z $_length ]]; then
-    _length=$(grep -A3 ListeningLength "$tmpInfo" | sed -rn 's/.*>([0-9]+ hours and [0-9]+ minutes).*/\1/p')
+    _length='unknown'
   fi
   echo -e "${C2}_length: $_length${C0}"
 
-  _rating=$(grep 'averageStarRating' "$inFile"| sed -rn 's/.*icon-alt">(.*)<\/span><\/i><\/div>.*/\1/p')
+  _rating=$(grep -m1 'out of 5 stars' "$normalFile" | sed -rn 's/.*<span.*([0-9].[0-9]) out of.*/\1/p')
   echo -e "${C2}_rating: $_rating${C0}"
 
-  _image=$(grep 'data-ssf-share-icon' "$inFile" | sed -rn 's/.*(https:\/\/m\.media.*\.jpg).*/\1/p')
+  _image=$(grep 'data-ssf-share-icon' "$normalFile" | sed -rn 's/.*(https:\/\/m.media-amazon.com.*\.jpg).*/\1/p')
   echo -e "${C2}_image: $_image${C0}"
-  rm "$tmpInfo"
 
-  _description=$(sed -n '/book_description_expander/, /a-expander-header/p' "$inFile" |\
-    hxnormalize | sed -n '/<p><span/, /<\/span>/p' | sed -n '/<p>/, /<\/div>/p' |\
-    sed 's/<.*>//g; s/<span//g; s/<\/span//; s/>//g; s/  //g' | tr '\n' ' ' | fold -s )
+  _description=$(sed -n '/book_description_expander/, /a-expander-header/p' "$normalFile" |\
+    sed 's/<[^>]*>//g; s/&[^;]*;//g; /^[[:space:]]*$/d' | fold -s | sed -r 's/^[[:space:]]+/\n  /g')
   echo -e "${C2}_description: \n${_description:0:80}...${C0}"
 
-  if [[ -z $_description ]]; then
-    _description=$(grep -B1 '</a:text>' "$inFile" | head -n -1 | sed 's/<[a-z/]*>//g' |\
-      sed -r 's/^ +//; s/<span class=\"a-text-[a-z]+\">//g' | sed 's/ <.*>//g' | fold -s)
-  fi
-
-  # Replace colon after title text (sweech doesn't like colons).
+  # Replace colons within title text (sweech doesn't like colons).
   _title=$(sed 's/:/-/g; s/ (.*//g' <<< "$_title")
+
+  bookTitle[index]="$_title"
   
-  # I give up!
+  # Prompt for missing title if not found
   if [[ -z ${bookTitle[$index]} ]]; then
     echo -e "${C4}Enter book title:${C0}: \c"
     read -r _bookTitle
@@ -504,7 +491,7 @@ parseInfo()
   _author=${_author/É/E}
   _author=${_author//[^a-zA-Z0-9 -.]/}
 
-  # I give up!
+  # Prompt for missing author if not found
   if [[ -z $_author ]]; then
     echo -e "${C4}Enter book author:${C0}: \c"
     read -r _author
@@ -515,21 +502,15 @@ parseInfo()
   # For one work authors
   bookAuthorReverse[$index]="${_authorReverse:-$_author}"
 
-  #TODO: Move to above methods
-  #bookISBN[$index]=$(grep -m 1 'itemprop=isbn' "$searchInfo" | hxselect -ic div | awk '{ print $1 }')
-  _isbn1=$(grep -m 1 'isbn' "$searchInfo" | sed -rn 's/.*\"isbn\"\:(\w+),.*/\1/p')
-  _isbn2=$(grep 'books:isbn' "$searchInfo" | sed -rn 's/.*tent=(.*) prop.*/\1/p')
-  bookISBN[$index]=${_isbn1:-$_isbn2}
-  bookASIN[$index]=$(grep -im 1 'asin' "$searchInfo" | sed -rn 's/.*ASIN=(\w+)\\.*/\1/p')
+  bookNarrator[index]="${_narrator}"
+  bookLength[index]="${_length}"
+  bookDescription[index]="$_description"
 
+  bookASIN[$index]="$_ASIN"
+  bookYear[$index]="$_year"
+  bookPublisher[$index]="$_publisher"
 
-  #pubInfo=$(grep -m 1 -P 'Published.*[1-2][0-9]{3}' "$searchInfo" | sed -rn 's/.*(Pub.*)<.*/\1/p')
-  pubInfo=$(grep -m 1 'publicationInfo' "$searchInfo" | hxnormalize | hxselect -ic p |\
-    sed 's/Published //')
-  bookYear[$index]=$(sed -rn 's/.*([0-9]{4}).*/\1/p' <<< "$pubInfo")
-  bookPublisher[$index]=$(awk -F' by ' '{ print $2 }' <<< "$pubInfo")
-
-  # I give up!
+  # Prompt for missing series if not found
   if [[ -z $_series ]]; then
     echo -e "${C4}Enter book series:${C0}: \c"
     read -r fullSeries
@@ -538,49 +519,7 @@ parseInfo()
   fi
   echo -e "${C2}++fullSeries=$fullSeries${C0}"
 
-  if grep -q ', #' <<< "$fullSeries"; then
-    sep=1
-  elif grep -q ' #' <<< "$fullSeries"; then
-    sep=2
-  elif grep -q ' Book ' <<< "$fullSeries"; then
-    sep=3
-  else
-    sep=4
-  fi
-
-  case $sep in
-    1) _bookSeries=$(awk -F', #' '{ print $1 }' <<< "$fullSeries")
-       _seriesNum=$(awk -F', #' '{ print $2 }' <<< "$fullSeries")
-       ;;
-    2) _bookSeries=$(awk -F' #' '{ print $1 }' <<< "$fullSeries")
-       _seriesNum=$(awk -F' #' '{ print $2 }' <<< "$fullSeries")
-       ;;
-    3) _bookSeries=$(awk -F' Book ' '{ print $1 }' <<< "$fullSeries")
-       _seriesNum=$(awk -F' Book ' '{ print $2 }' <<< "$fullSeries")
-       ;;
-    4) _bookSeries=$fullSeries
-       ;;
-    *) _bookSeries="Unknown"
-       ;;
-   esac
-
-  majNum=$(awk -F'.' '{ printf("%02d", $1) }' <<< "$_seriesNum")
-  minNum=$(awk -F'.' '{ print $2 }' <<< "$_seriesNum")
-
-  if [[ $majNum == '00' ]]; then
-    unset _seriesNum
-  elif [[ -n $minNum ]]; then
-    _seriesNum="${majNum}.${minNum}"
-  else
-    _seriesNum="$majNum"
-  fi
-
-  if [[ -n $_seriesNum ]]; then
-    _bookSeries="$_bookSeries $_seriesNum"
-  else
-    _bookSeries=${bookYear[$index]:-unknwn}
-  fi
-
+  _bookSeries="$_series"
   _bookSeries=${_bookSeries/:/-}
   _bookSeries=${_bookSeries/&apos;/\'}
   _bookSeries=${_bookSeries//[^a-zA-Z0-9 -]/}
@@ -588,16 +527,20 @@ parseInfo()
 
   bookRating[$index]=$_rating
 
+  _searchInfo="${_title} ${_author}"
+  _searchInfo=${_searchInfo// /+/}
+  _genre=$(curl -s -i "https://www.goodreads.com/search?q=${_searchInfo}" | hxnormalize -l 9999 |\
+     grep -A4 -i 'related shelves' | sed -rn 's/.*\/shelf\/show\/(.*)" .*/\1/p')
+
   if [[ -n $_image ]]; then
     imageSource[$index]=$_image
   else
     echo -e "${C4}Enter book image url:${C0}: \c"
-    read -r imageSource[$index]
+    read -r imageSource["$index"]
   fi
 
   baseName[$index]="${bookAuthor[$index]} - ${bookSeries[$index]} - ${bookTitle[$index]}"
   bookInfo[$index]="$workDir/${baseName[$index]}.info"
-  #bookLink[$index]="$workDir/${baseName[$index]}.url"
   bookCover[$index]="$workDir/${baseName[$index]}.jpg"
 
   if [[ -n ${imageSource[$index]} ]]; then
@@ -608,7 +551,6 @@ parseInfo()
    Author: ${bookAuthor[$index]}
     Title: ${bookTitle[$index]}
      ASIN: ${bookASIN[$index]}
-     ISBN: ${bookISBN[$index]}
    Series: ${bookSeries[$index]}
      Year: ${bookYear[$index]}
 Publisher: ${bookPublisher[$index]}
@@ -619,11 +561,11 @@ Publisher: ${bookPublisher[$index]}
 
 
 Classifications:
-  ${_genre[@]}
+  ${_genre}
 
 
 Summary:
-  $summary
+  $_description
 EOF
 
   # Replace extended characters with apostrophe
@@ -746,8 +688,6 @@ EOM
   else
     cleanUp 20
   fi
-
-  echo -e "${C8}>>> bookType: $bookType ${C0}"
 }
 
 checkFile()
@@ -957,10 +897,6 @@ while [[ $# -gt 0 ]]; do
       ;;
     -r | --recurse) # Search subdirectories for files
       recurse=true
-      shift
-      ;;
-    -v | --verify) # Verify ID3 tags
-      #verify=true
       shift
       ;;
     *) # Unknown option
