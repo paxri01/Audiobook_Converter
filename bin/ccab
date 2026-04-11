@@ -1,0 +1,556 @@
+#!/bin/bash
+# shellcheck disable=SC2034,SC1090,SC1091,SC2154
+
+## ========================================================================================
+##       Title: ccab
+##      Author: R. L. Paxton
+##     Version: 2.0
+##        Date: 2026-04-08
+##     License: Apache 2.0
+## Description: Audiobook conversion and organization toolkit
+##
+## Usage: ccab [OPTIONS] [DIRECTORY]
+##
+##   -c             Combine multiple audio files into one before processing
+##   -h             Display help
+##   -m <MODE>      Move final files to mode directory (1-6)
+##   -t <DIR>       Convert using pre-extracted metadata from directory
+##   -u             Update existing .info file from a fresh book.html
+##   -v             Interactively verify/edit metadata before encoding
+##   -x             Extract and search metadata only (no conversion)
+##   --check        Check all required dependencies
+##
+## Examples:
+##   ccab -m 1                 # Extract, encode, move to genre 1 dir
+##   ccab -c -m 1              # Combine files first, then encode and move
+##   ccab -m 1 -v              # Extract, verify metadata, encode, move
+##   ccab -x                   # Extract metadata only, save to working dir
+##   ccab -t /tmp/ccab/sess    # Skip extraction, convert from saved JSON
+##   ccab -u                   # Update .info file from new book.html
+##   ccab --check              # Check dependencies
+## ========================================================================================
+
+set -euo pipefail
+
+# ---------------------------------------------------------------------------
+# Paths
+# ---------------------------------------------------------------------------
+
+CCAB_BIN_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CCAB_ROOT_DIR="$(dirname "$CCAB_BIN_DIR")"
+
+# Prefer libs adjacent to the project root (dev/run-in-place); fall back to
+# the standard XDG data location used by install.sh.
+if [[ -f "$CCAB_ROOT_DIR/lib/logging.sh" ]]; then
+    CCAB_LIB_DIR="$CCAB_ROOT_DIR/lib"
+else
+    CCAB_LIB_DIR="${HOME}/.local/share/ccab/lib"
+fi
+
+CCAB_CONF="${HOME}/.config/smart-ccab.conf"
+
+# ---------------------------------------------------------------------------
+# Source config
+# ---------------------------------------------------------------------------
+
+if [[ -f "$CCAB_CONF" ]]; then
+    source "$CCAB_CONF"
+else
+    echo "[WARN] Config not found: $CCAB_CONF — using defaults" >&2
+fi
+
+# Apply config defaults for anything not set
+logLevel="${logLevel:-INFO}"
+logDir="${logDir:-/var/log/ccab}"
+targetBitrate="${targetBitrate:-48k}"
+audioChannels="${audioChannels:-stereo}"
+htmlBookFile="${htmlBookFile:-/tmp/book.html}"
+webscrapeEnabled="${webscrapeEnabled:-true}"
+AUDIOBOOK_BASE_DIR="${AUDIOBOOK_BASE_DIR:-$HOME/Audiobooks}"
+CLEANUP_WORKING_DIR_AFTER_SUCCESS="${CLEANUP_WORKING_DIR_AFTER_MOVE:-false}"
+enableThumbnails="${enableThumbnails:-true}"
+
+# ---------------------------------------------------------------------------
+# Source libraries (order matters: logging first, then the rest)
+# ---------------------------------------------------------------------------
+
+for _lib in logging validation files audio metadata search; do
+    _lib_path="$CCAB_LIB_DIR/${_lib}.sh"
+    if [[ ! -f "$_lib_path" ]]; then
+        echo "[ERROR] Missing library: $_lib_path" >&2
+        exit 1
+    fi
+    source "$_lib_path"
+done
+unset _lib _lib_path
+
+# ---------------------------------------------------------------------------
+# Global metadata arrays (indexed by file number)
+# ---------------------------------------------------------------------------
+
+declare -ga files=()
+declare -ga titles=()
+declare -ga authors=()
+declare -ga series=()
+declare -ga albums=()
+declare -ga durations=()
+declare -ga bitrates=()
+declare -ga descriptions=()
+declare -ga genres=()
+declare -ga dates=()
+declare -ga asins=()
+declare -ga narrators=()
+declare -ga publishers=()
+declare -ga release_dates=()
+declare -ga languages=()
+declare -ga ratings=()
+declare -ga cover_urls=()
+
+# ---------------------------------------------------------------------------
+# Flags
+# ---------------------------------------------------------------------------
+
+FLAG_COMBINE=false
+FLAG_EXTRACT=false
+FLAG_UPDATE=false
+FLAG_VERIFY=false
+FLAG_MOVE_MODE=""
+FLAG_METADATA_DIR=""
+TARGET_DIR="${PWD}"
+
+# ---------------------------------------------------------------------------
+# usage
+# ---------------------------------------------------------------------------
+
+usage()
+{
+    cat << EOF
+
+${C4}ccab${C0} — Audiobook Conversion and Archive Builder
+
+${C8}Usage:${C0}
+  ccab [OPTIONS] [DIRECTORY]
+
+${C8}Options:${C0}
+  ${C3}-c${C0}             Combine multiple audio files into one before processing
+  ${C3}-h${C0}             Display this help message
+  ${C3}-m <MODE>${C0}      Move final files to mode directory (1=Fantasy, 2=SciFi,
+                 3=Thriller, 4=Romance, 5=Erotica, 6=Misc)
+  ${C3}-t <DIR>${C0}       Convert using pre-extracted metadata from directory
+  ${C3}-u${C0}             Update existing .info file from a fresh book.html
+  ${C3}-v${C0}             Interactively verify/edit metadata before encoding
+  ${C3}-x${C0}             Extract and search metadata only (no conversion)
+  ${C3}--check${C0}        Check all required dependencies
+
+${C8}Examples:${C0}
+  ccab -m 1                 Extract, encode, move to genre 1 directory
+  ccab -c -m 1              Combine files first, then encode and move
+  ccab -m 1 -v              Extract, verify metadata interactively, encode, move
+  ccab -x                   Extract metadata only, save to working directory
+  ccab -t /tmp/ccab/sess    Skip extraction, convert from saved JSON
+  ccab -u                   Update .info file from new book.html
+  ccab --check              Verify all required dependencies are installed
+
+${C8}Config:${C0} $CCAB_CONF
+
+EOF
+}
+
+# ---------------------------------------------------------------------------
+# check_dependencies
+# ---------------------------------------------------------------------------
+
+check_dependencies()
+{
+    local -a required_cmds=(ffmpeg ffprobe mid3v2 curl jq python3)
+    local -a optional_cmds=(notify-send convert)
+    local all_ok=true
+
+    echo
+    echo -e "${C4}=== Dependency Check ===${C0}"
+    echo
+
+    for cmd in "${required_cmds[@]}"; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            echo -e "  ${C2}[OK]${C0}    $cmd"
+        else
+            echo -e "  ${C1}[MISSING]${C0} $cmd  ${C8}(required)${C0}"
+            all_ok=false
+        fi
+    done
+
+    for cmd in "${optional_cmds[@]}"; do
+        if command -v "$cmd" >/dev/null 2>&1; then
+            echo -e "  ${C2}[OK]${C0}    $cmd  ${C8}(optional)${C0}"
+        else
+            echo -e "  ${C3}[--]${C0}    $cmd  ${C8}(optional — notifications/thumbnails)${C0}"
+        fi
+    done
+
+    # Python parse_html.py
+    if [[ -f "$CCAB_LIB_DIR/parse_html.py" ]]; then
+        echo -e "  ${C2}[OK]${C0}    parse_html.py"
+    else
+        echo -e "  ${C1}[MISSING]${C0} $CCAB_LIB_DIR/parse_html.py  ${C8}(required)${C0}"
+        all_ok=false
+    fi
+
+    echo
+    if $all_ok; then
+        echo -e "  ${C2}All required dependencies present.${C0}"
+    else
+        echo -e "  ${C1}One or more required dependencies are missing.${C0}"
+        echo
+        return 1
+    fi
+    echo
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# _wait_for_book_html  — prompt user to save book.html then wait
+# ---------------------------------------------------------------------------
+
+_wait_for_book_html()
+{
+    local html_path="${htmlBookFile:-/tmp/book.html}"
+
+    echo
+    echo -e "${C4}================================================================${C0}"
+    echo -e "${C4}  Open one of the links above in your browser, then save the${C0}"
+    echo -e "${C4}  page as:  ${C3}${html_path}${C0}"
+    echo -e "${C4}================================================================${C0}"
+    echo -e "\n${C8}Press Enter when book.html is saved (Ctrl+C to skip)...${C0}\n"
+
+    read -r _dummy 2>/dev/null || true
+
+    if [[ -f "$html_path" ]]; then
+        log_info "book.html found: $html_path"
+        return 0
+    fi
+    log_warn "book.html not found at: $html_path — skipping web metadata"
+    return 1
+}
+
+# ---------------------------------------------------------------------------
+# _discover_and_populate  — fill global arrays from files in TARGET_DIR
+# ---------------------------------------------------------------------------
+
+_discover_and_populate()
+{
+    discover_audio_files "$TARGET_DIR" files || return 1
+
+    local file_count=${#files[@]}
+    log_info "Processing $file_count audio file(s)"
+
+    for ((i=0; i<file_count; i++)); do
+        # Pre-initialize every slot so no array index is ever unbound
+        titles[$i]=""    authors[$i]=""   series[$i]=""    albums[$i]=""
+        durations[$i]="" bitrates[$i]=""  descriptions[$i]="" genres[$i]=""
+        dates[$i]=""     asins[$i]=""     narrators[$i]=""  publishers[$i]=""
+        release_dates[$i]="" languages[$i]="" ratings[$i]="" cover_urls[$i]=""
+
+        log_info "Extracting metadata: $(basename "${files[$i]}")"
+        if ! extract_id3_metadata "${files[$i]}" "$i"; then
+            parse_filename_metadata "${files[$i]}" "$i"
+        fi
+        clean_author_field "$i"
+    done
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# run_extract  — extract metadata, search, parse book.html, save JSON
+# ---------------------------------------------------------------------------
+
+run_extract()
+{
+    log_info "=== Extract phase ==="
+
+    create_working_directory "$$" "ccab_session" || return 1
+    setup_cleanup_trap
+
+    _discover_and_populate || return 1
+
+    # Google search: build query for first file with enough metadata
+    if [[ "${webscrapeEnabled:-true}" == "true" ]]; then
+        local sq
+        sq=$(build_search_query \
+            "${titles[0]:-}" \
+            "${authors[0]:-}" \
+            "${series[0]:-}")
+        if [[ -n "$sq" ]]; then
+            searchBooks "$sq" 10 && display_search_results "$filtered_results"
+        else
+            log_warn "No metadata found to build search query"
+        fi
+
+        # Wait for user to save book.html, then parse it
+        if _wait_for_book_html; then
+            # Move HTML into working dir; update htmlBookFile so parse_book_html
+            # finds it at the new location (move_book_html deletes the original)
+            local moved_html=""
+            move_book_html "${htmlBookFile:-/tmp/book.html}" moved_html
+            [[ -n "$moved_html" && -f "$moved_html" ]] && htmlBookFile="$moved_html"
+
+            # Parse each file's metadata against the HTML
+            local file_count=${#files[@]}
+            for ((i=0; i<file_count; i++)); do
+                parse_book_html "$i"
+                merge_audiobook_metadata "$i" "true"
+            done
+        fi
+    fi
+
+    # Interactive verify (-v)
+    if [[ "$FLAG_VERIFY" == "true" ]]; then
+        confirm_metadata "${webscrapeEnabled:-true}" || {
+            log_warn "Metadata confirmation aborted"
+            return 1
+        }
+    fi
+
+    display_metadata_results "${webscrapeEnabled:-true}"
+    save_metadata_json "${webscrapeEnabled:-true}"
+
+    log_info "Extraction complete. Working dir: $CCAB_WORKING_DIR"
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# run_convert  — encode, tag, cover art, optionally organize
+# ---------------------------------------------------------------------------
+
+run_convert()
+{
+    local meta_dir="${1:-${CCAB_WORKING_DIR:-}}"
+
+    [[ -z "$meta_dir" ]] && { log_error "No metadata directory specified"; return 1; }
+
+    local json_file="$meta_dir/extracted_metadata.json"
+    [[ ! -f "$json_file" ]] && { log_error "Metadata JSON not found: $json_file"; return 1; }
+
+    log_info "=== Convert phase ==="
+
+    local -A meta=()
+    load_metadata_json "$json_file" meta || return 1
+
+    local source_file="${meta[file]:-}"
+    [[ ! -f "$source_file" ]] && { log_error "Source audio file not found: $source_file"; return 1; }
+
+    local source_dir
+    source_dir="$(dirname "$source_file")"
+
+    # Build output filename from metadata
+    local safe_title safe_author
+    sanitize_for_filename "${meta[title]:-Unknown}" safe_title
+    sanitize_for_filename "${meta[author]:-Unknown}" safe_author
+
+    local series_num="${meta[series_number]:-01}"
+    series_num=$(printf "%02d" "$series_num" 2>/dev/null || echo "01")
+
+    local base_filename
+    if [[ -n "${meta[series]:-}" ]]; then
+        local safe_series
+        sanitize_for_filename "${meta[series]}" safe_series
+        base_filename="${safe_author} - ${safe_series} ${series_num} - ${safe_title}"
+    else
+        base_filename="${safe_author} - ${safe_title}"
+    fi
+
+    local output_mp3="$meta_dir/${base_filename}.mp3"
+
+    # Combine mode: merge all files first
+    if [[ "$FLAG_COMBINE" == "true" ]]; then
+        log_info "Combining audio files in: $source_dir"
+        combine_audio_files "$source_dir" "$output_mp3" \
+            "${targetBitrate:-48k}" "audiobook" || return 1
+    else
+        convert_to_mp3 "$source_file" "$output_mp3" \
+            "${targetBitrate:-48k}" "audiobook" || return 1
+    fi
+
+    # Download cover art
+    local cover_file=""
+    if [[ -n "${meta[cover_url]:-}" && "${meta[cover_url]}" != "null" ]]; then
+        save_cover_art "${meta[cover_url]}" \
+            "${meta[title]:-}" "${meta[author]:-}" cover_file \
+            "${meta[series]:-}" "${meta[series_number]:-}"
+    fi
+
+    # Apply ID3 tags + cover
+    local tag_args=()
+    for k in "${!meta[@]}"; do
+        [[ -n "${meta[$k]}" && "${meta[$k]}" != "null" ]] && tag_args+=("$k=${meta[$k]}")
+    done
+    [[ -n "$cover_file" ]] && tag_args+=("cover_file=$cover_file")
+
+    apply_id3_tags "$output_mp3" "${tag_args[@]}"
+
+    # Generate thumbnail
+    local thumb_file=""
+    if [[ -n "$cover_file" && "${enableThumbnails:-true}" == "true" ]]; then
+        thumb_file="$meta_dir/thumbnail_cover_${base_filename}.png"
+        generate_notification_thumbnail "$cover_file" "$thumb_file"
+    fi
+
+    # Organize files (-m MODE)
+    if [[ -n "$FLAG_MOVE_MODE" ]]; then
+        local org_args=()
+        for k in "${!meta[@]}"; do
+            [[ -n "${meta[$k]}" && "${meta[$k]}" != "null" ]] && org_args+=("$k=${meta[$k]}")
+        done
+        organize_audiobook_files "$FLAG_MOVE_MODE" "$meta_dir" "$base_filename" \
+            "${org_args[@]}" || {
+            log_error "File organization failed"
+            return 1
+        }
+    fi
+
+    # Desktop notification
+    send_conversion_notification \
+        "${meta[title]:-Unknown}" \
+        "${meta[author]:-Unknown}" \
+        "${thumb_file:-}"
+
+    log_info "=== Conversion complete ==="
+    return 0
+}
+
+# ---------------------------------------------------------------------------
+# run_update  — update existing .info file from fresh book.html
+# ---------------------------------------------------------------------------
+
+run_update()
+{
+    local search_dir="${1:-$TARGET_DIR}"
+    local html_path="${htmlBookFile:-/tmp/book.html}"
+
+    # Find .info file in the target directory
+    local info_file=""
+    while IFS= read -r -d '' f; do
+        info_file="$f"
+        break
+    done < <(find "$search_dir" -maxdepth 2 -name "*.info" -print0 2>/dev/null)
+
+    if [[ -z "$info_file" ]]; then
+        log_error "No .info file found in: $search_dir"
+        log_error "Run a full conversion first to generate the .info file."
+        return 1
+    fi
+
+    log_info "Updating: $(basename "$info_file")"
+
+    if [[ ! -f "$html_path" ]]; then
+        # Search for the book and prompt user to save book.html
+        # Load existing info to get title/author for search query
+        local sq
+        sq=$(build_search_query \
+            "$(jq -r '.title // ""' "$info_file" 2>/dev/null)" \
+            "$(jq -r '.author // ""' "$info_file" 2>/dev/null)" \
+            "")
+        if [[ -n "$sq" ]]; then
+            searchBooks "$sq" 10 && display_search_results "$filtered_results"
+        fi
+        _wait_for_book_html || return 1
+    fi
+
+    update_info_from_html "$info_file" "$html_path"
+}
+
+# ---------------------------------------------------------------------------
+# parse_flags
+# ---------------------------------------------------------------------------
+
+parse_flags()
+{
+    # Handle --check before getopts (getopts doesn't handle long opts)
+    for arg in "$@"; do
+        if [[ "$arg" == "--check" ]]; then
+            check_dependencies
+            exit $?
+        fi
+    done
+
+    local OPTIND=1
+    while getopts ":cm:t:uvxh" opt; do
+        case "$opt" in
+            c) FLAG_COMBINE=true ;;
+            m)
+                if [[ ! "$OPTARG" =~ ^[1-6]$ ]]; then
+                    echo -e "${C1}[ERROR]${C0} Invalid move mode: $OPTARG (valid: 1-6)" >&2
+                    exit 1
+                fi
+                FLAG_MOVE_MODE="$OPTARG"
+                ;;
+            t)
+                if [[ ! -d "$OPTARG" ]]; then
+                    echo -e "${C1}[ERROR]${C0} Metadata directory not found: $OPTARG" >&2
+                    exit 1
+                fi
+                FLAG_METADATA_DIR="$OPTARG"
+                ;;
+            u) FLAG_UPDATE=true ;;
+            v) FLAG_VERIFY=true ;;
+            x) FLAG_EXTRACT=true ;;
+            h) usage; exit 0 ;;
+            :)
+                echo -e "${C1}[ERROR]${C0} Option -$OPTARG requires an argument" >&2
+                exit 1
+                ;;
+            ?)
+                echo -e "${C1}[ERROR]${C0} Unknown option: -$OPTARG" >&2
+                usage
+                exit 1
+                ;;
+        esac
+    done
+    shift $((OPTIND - 1))
+
+    # Optional positional: target directory
+    if [[ $# -gt 0 ]]; then
+        if [[ ! -d "$1" ]]; then
+            echo -e "${C1}[ERROR]${C0} Directory not found: $1" >&2
+            exit 1
+        fi
+        TARGET_DIR="$1"
+    fi
+}
+
+# ---------------------------------------------------------------------------
+# main
+# ---------------------------------------------------------------------------
+
+main()
+{
+    parse_flags "$@"
+
+    # -u: update .info file from fresh book.html
+    if [[ "$FLAG_UPDATE" == "true" ]]; then
+        run_update "$TARGET_DIR"
+        exit $?
+    fi
+
+    # -t DIR: skip extraction, convert from pre-existing JSON
+    if [[ -n "$FLAG_METADATA_DIR" ]]; then
+        # We still need a working dir for cover art download / thumbnail
+        CCAB_WORKING_DIR="$FLAG_METADATA_DIR"
+        export CCAB_WORKING_DIR
+        setup_cleanup_trap
+        run_convert "$FLAG_METADATA_DIR"
+        exit $?
+    fi
+
+    # -x: extract only (no conversion)
+    if [[ "$FLAG_EXTRACT" == "true" ]]; then
+        run_extract
+        exit $?
+    fi
+
+    # Default: extract then convert
+    run_extract || exit 1
+    run_convert "$CCAB_WORKING_DIR"
+    exit $?
+}
+
+main "$@"
