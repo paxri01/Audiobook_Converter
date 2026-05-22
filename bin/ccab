@@ -134,8 +134,9 @@ ${C8}Usage:${C0}
 ${C8}Options:${C0}
   ${C3}-c${C0}             Combine multiple audio files into one before processing
   ${C3}-h${C0}             Display this help message
-  ${C3}-m <MODE>${C0}      Move final files to mode directory (1=Fantasy, 2=SciFi,
-                 3=Thriller, 4=Romance, 5=Erotica, 6=Misc)
+  ${C3}-m <MODE>${C0}      Move final files to mode directory:
+                 1=${MOVE_1:-Fantasy}  2=${MOVE_2:-SciFi}  3=${MOVE_3:-Thriller}
+                 4=${MOVE_4:-Romance}  5=${MOVE_5:-Erotica}  6=${MOVE_6:-Misc}
   ${C3}-t <DIR>${C0}       Convert using pre-extracted metadata from directory
   ${C3}-u${C0}             Update existing .info file from a fresh book.html
   ${C3}-v${C0}             Interactively verify/edit metadata before encoding
@@ -293,25 +294,36 @@ run_extract()
             move_book_html "${htmlBookFile:-/tmp/book.html}" moved_html
             [[ -n "$moved_html" && -f "$moved_html" ]] && htmlBookFile="$moved_html"
 
-            # Parse each file's metadata against the HTML
+            # In combine mode only file 0's metadata is needed for the output
             local file_count=${#files[@]}
-            for ((i=0; i<file_count; i++)); do
+            local parse_limit=$file_count
+            [[ "$FLAG_COMBINE" == "true" ]] && parse_limit=1
+            for ((i=0; i<parse_limit; i++)); do
                 parse_book_html "$i"
                 merge_audiobook_metadata "$i" "true"
             done
         fi
     fi
 
-    # Interactive verify (-v)
+    # Interactive verify (-v): combine mode only needs confirmation for file 0
     if [[ "$FLAG_VERIFY" == "true" ]]; then
-        confirm_metadata "${webscrapeEnabled:-true}" || {
-            log_warn "Metadata confirmation aborted"
-            return 1
-        }
+        if [[ "$FLAG_COMBINE" == "true" ]]; then
+            confirm_single_metadata 0 "${webscrapeEnabled:-true}"
+            case $? in
+                1) log_warn "Metadata confirmation aborted"; return 1 ;;
+            esac
+        else
+            confirm_metadata "${webscrapeEnabled:-true}" || {
+                log_warn "Metadata confirmation aborted"
+                return 1
+            }
+        fi
     fi
 
     display_metadata_results "${webscrapeEnabled:-true}"
-    save_metadata_json "${webscrapeEnabled:-true}"
+    local save_limit=${#files[@]}
+    [[ "$FLAG_COMBINE" == "true" ]] && save_limit=1
+    save_metadata_json "${webscrapeEnabled:-true}" "$save_limit"
 
     log_info "Extraction complete. Working dir: $CCAB_WORKING_DIR"
     return 0
@@ -359,6 +371,27 @@ run_convert()
     fi
 
     local output_mp3="$meta_dir/${base_filename}.mp3"
+
+    # If -m is set, check whether the book already exists in the destination
+    if [[ -n "$FLAG_MOVE_MODE" ]]; then
+        local org_args=() dest_path
+        for k in "${!meta[@]}"; do
+            [[ -n "${meta[$k]}" && "${meta[$k]}" != "null" ]] && org_args+=("$k=${meta[$k]}")
+        done
+        dest_path=$(compute_organized_path "$FLAG_MOVE_MODE" "${org_args[@]}" 2>/dev/null) || true
+        if [[ -n "$dest_path" && -d "$dest_path" ]] && \
+           compgen -G "$dest_path"/*.mp3 > /dev/null 2>&1; then
+            echo
+            echo -e "${C3}[WARN]${C0} This book already exists at:"
+            echo -e "       $dest_path"
+            echo -e "${C8}Re-encode and overwrite? (y/N): ${C0}"
+            read -r _overwrite
+            if [[ ! "$_overwrite" =~ ^[Yy]$ ]]; then
+                log_info "Skipping: $base_filename"
+                return 0
+            fi
+        fi
+    fi
 
     # Combine mode: merge all files first
     if [[ "$FLAG_COMBINE" == "true" ]]; then
@@ -446,8 +479,8 @@ run_update()
         # Load existing info to get title/author for search query
         local sq
         sq=$(build_search_query \
-            "$(jq -r '.title // ""' "$info_file" 2>/dev/null)" \
-            "$(jq -r '.author // ""' "$info_file" 2>/dev/null)" \
+            "$(grep -m1 '^Title: ' "$info_file" | sed 's/^Title: //')" \
+            "$(grep -m1 '^Author: ' "$info_file" | sed 's/^Author: //')" \
             "")
         if [[ -n "$sq" ]]; then
             searchBooks "$sq" 10 && display_search_results "$filtered_results"
@@ -455,7 +488,101 @@ run_update()
         _wait_for_book_html || return 1
     fi
 
-    update_info_from_html "$info_file" "$html_path"
+    update_info_from_html "$info_file" "$html_path" || return 1
+
+    # -----------------------------------------------------------------------
+    # Apply updated metadata to the .mp3: ID3 tags, cover art, rename files
+    # -----------------------------------------------------------------------
+
+    local dir
+    dir="$(dirname "$info_file")"
+
+    # Find the .mp3 file
+    local mp3_file=""
+    while IFS= read -r -d '' f; do
+        mp3_file="$f"; break
+    done < <(find "$dir" -maxdepth 1 -name "*.mp3" -print0 2>/dev/null)
+
+    if [[ -z "$mp3_file" ]]; then
+        log_warn "No .mp3 file found in $dir — skipping tag update and rename"
+        return 0
+    fi
+
+    # Read merged metadata from the updated .info
+    local title author series_raw series series_num
+    local narrator publisher release_date asin rating description
+
+    title=$(grep -m1 '^Title: '        "$info_file" | sed 's/^Title: //')        || true
+    author=$(grep -m1 '^Author: '       "$info_file" | sed 's/^Author: //')       || true
+    series_raw=$(grep -m1 '^Series: '   "$info_file" | sed 's/^Series: //')       || true
+    series_num=$(echo "$series_raw" | sed -n 's/.* #\([0-9]*\)$/\1/p')           || true
+    series="${series_raw% #[0-9]*}"
+    narrator=$(grep -m1 '^Narrator: '   "$info_file" | sed 's/^Narrator: //')     || true
+    publisher=$(grep -m1 '^Publisher: ' "$info_file" | sed 's/^Publisher: //')    || true
+    release_date=$(grep -m1 '^Release Date: ' "$info_file" | sed 's/^Release Date: //') || true
+    asin=$(grep -m1 '^ASIN: '           "$info_file" | sed 's/^ASIN: //')         || true
+    rating=$(grep -m1 '^Rating: '       "$info_file" | sed 's/^Rating: //')       || true
+    description=$(awk '/^DESCRIPTION$/{f=1;next} /^TECHNICAL METADATA$/{exit} /^={3,}$/{next} f && NF{print}' \
+        "$info_file" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+    # Build new base filename from updated metadata
+    local safe_title safe_author safe_series new_base
+    sanitize_for_filename "$title"  safe_title
+    sanitize_for_filename "$author" safe_author
+    safe_title="${safe_title/ Unabridged/}"
+    if [[ -n "$series" ]]; then
+        sanitize_for_filename "$series" safe_series
+        safe_series="${safe_series/ Unabridged/}"
+        new_base="${safe_author} - ${safe_series} ${series_num} - ${safe_title}"
+    else
+        new_base="${safe_author} - ${safe_title}"
+    fi
+
+    # Find cover art: update_info_from_html downloads it using the old base name
+    local old_base cover_file=""
+    old_base="$(basename "${info_file%.info}")"
+    if [[ -f "$dir/${old_base}.jpg" ]]; then
+        cover_file="$dir/${old_base}.jpg"
+    else
+        for cover_file in "$dir"/*.jpg; do
+            [[ -f "$cover_file" ]] && break
+            cover_file=""
+        done
+    fi
+
+    # Apply all ID3 tags (and embed cover art if available)
+    log_info "Applying ID3 tags to: $(basename "$mp3_file")"
+    local tag_args=(
+        "title=$title"
+        "author=$author"
+        "album=$title"
+        "series=$series"
+        "series_number=$series_num"
+        "narrator=$narrator"
+        "publisher=$publisher"
+        "release_date=$release_date"
+        "asin=$asin"
+        "rating=$rating"
+        "description=$description"
+    )
+    [[ -n "$cover_file" ]] && tag_args+=("cover_file=$cover_file")
+    apply_id3_tags "$mp3_file" "${tag_args[@]}"
+
+    # Rename .mp3, .info, and .jpg to match updated metadata
+    if [[ "$mp3_file" != "$dir/${new_base}.mp3" ]]; then
+        log_info "Renaming mp3:  $(basename "$mp3_file") → ${new_base}.mp3"
+        mv "$mp3_file" "$dir/${new_base}.mp3"
+    fi
+    if [[ "$info_file" != "$dir/${new_base}.info" ]]; then
+        log_info "Renaming info: $(basename "$info_file") → ${new_base}.info"
+        mv "$info_file" "$dir/${new_base}.info"
+    fi
+    if [[ -n "$cover_file" && "$cover_file" != "$dir/${new_base}.jpg" ]]; then
+        log_info "Renaming jpg:  $(basename "$cover_file") → ${new_base}.jpg"
+        mv "$cover_file" "$dir/${new_base}.jpg"
+    fi
+
+    return 0
 }
 
 # ---------------------------------------------------------------------------

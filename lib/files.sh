@@ -140,7 +140,7 @@ get_move_genre()
 # File organization
 # ---------------------------------------------------------------------------
 
-create_organized_directory()
+compute_organized_path()
 {
     local move_mode="$1"
     shift
@@ -168,8 +168,10 @@ create_organized_directory()
     sanitize_for_filename "$series"          safe_series
     sanitize_for_filename "$move_genre"      safe_genre
 
-    # Remove LitRPG noise from title
+    # Remove common noise words from title and series
     safe_title="${safe_title/ A LitRPG Adventure/}"
+    safe_title="${safe_title/ Unabridged/}"
+    safe_series="${safe_series/ Unabridged/}"
 
     local series_dir
     if [[ -n "$series" ]]; then
@@ -184,7 +186,16 @@ create_organized_directory()
         series_dir="$safe_title"
     fi
 
-    local organized_path="$base_dir/$safe_genre/$safe_author/$series_dir"
+    echo "$base_dir/$safe_genre/$safe_author/$series_dir"
+}
+
+create_organized_directory()
+{
+    local move_mode="$1"
+    shift
+
+    local organized_path
+    organized_path=$(compute_organized_path "$move_mode" "$@") || return 1
 
     log_info "Creating directory: $organized_path"
     if mkdir -p "$organized_path"; then
@@ -368,4 +379,4 @@ organize_audiobook_files()
 
 export -f discover_audio_files discover_json_files build_search_query
 export -f validate_move_mode get_move_genre
-export -f create_organized_directory create_info_file copy_audiobook_files organize_audiobook_files
+export -f compute_organized_path create_organized_directory create_info_file copy_audiobook_files organize_audiobook_files

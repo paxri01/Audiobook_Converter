@@ -292,8 +292,10 @@ save_metadata_json()
 {
     local webscrape_enabled="${1:-false}"
     local file_count=${#files[@]}
+    local save_limit="${2:-$file_count}"
+    [[ $save_limit -gt $file_count ]] && save_limit=$file_count
 
-    for ((i=0; i<file_count; i++)); do
+    for ((i=0; i<save_limit; i++)); do
         local clean_series="${series[$i]:-}"
         local series_number=""
 
@@ -407,37 +409,115 @@ update_info_from_html()
         log_error "HTML parser returned no data"; return 1
     fi
 
-    # Merge scraped fields into existing .info file using jq
-    local merged
-    merged=$(jq -s '.[0] * {
-        title:        (.[1].title        // .[0].title),
-        author:       (.[1].author       // .[0].author),
-        series:       (.[1].series       // .[0].series),
-        series_number:(.[1].series_number// .[0].series_number),
-        narrator:     (.[1].narrator     // .[0].narrator),
-        publisher:    (.[1].publisher    // .[0].publisher),
-        release_date: (.[1].release_date // .[0].release_date),
-        rating:       (.[1].rating       // .[0].rating),
-        cover_url:    (.[1].cover_url    // .[0].cover_url),
-        description:  (.[1].description  // .[0].description)
-    }' "$info_file" - <<< "$scraped_json")
+    # Parse the plain-text .info into a JSON object for merging
+    local ex_series_raw ex_series ex_series_num
+    ex_series_raw=$(grep -m1 '^Series: ' "$info_file" | sed 's/^Series: //') || true
+    ex_series_num=$(echo "$ex_series_raw" | sed -n 's/.* #\([0-9]*\)$/\1/p') || true
+    ex_series=$(echo "$ex_series_raw" | sed 's/ #[0-9]*$//')
 
-    if echo "$merged" > "$info_file"; then
-        log_info "Updated info file: $(basename "$info_file")"
-        # Re-download cover art if cover_url changed
-        local new_cover
-        new_cover=$(echo "$scraped_json" | jq -r '.cover_url // ""' 2>/dev/null)
-        if [[ -n "$new_cover" && "$new_cover" != "null" ]]; then
-            local cover_dest
-            cover_dest="$(dirname "$info_file")/$(basename "${info_file%.info}").jpg"
-            curl -s -L --max-time 30 --max-filesize "10M" \
-                 --user-agent "ccab/2.0" -o "$cover_dest" "$new_cover" && \
-                log_info "Cover art updated: $(basename "$cover_dest")"
+    local ex_description
+    ex_description=$(awk '/^DESCRIPTION$/{f=1;next} /^TECHNICAL METADATA$/{exit} /^={3,}$/{next} f && NF{print}' \
+        "$info_file" | tr '\n' ' ' | sed 's/[[:space:]]*$//')
+
+    local existing_json
+    existing_json=$(jq -n \
+        --arg title        "$(grep -m1 '^Title: '        "$info_file" | sed 's/^Title: //')" \
+        --arg author       "$(grep -m1 '^Author: '       "$info_file" | sed 's/^Author: //')" \
+        --arg series       "$ex_series" \
+        --arg series_num   "$ex_series_num" \
+        --arg narrator     "$(grep -m1 '^Narrator: '     "$info_file" | sed 's/^Narrator: //')" \
+        --arg publisher    "$(grep -m1 '^Publisher: '    "$info_file" | sed 's/^Publisher: //')" \
+        --arg duration     "$(grep -m1 '^Duration: '     "$info_file" | sed 's/^Duration: //')" \
+        --arg release_date "$(grep -m1 '^Release Date: ' "$info_file" | sed 's/^Release Date: //')" \
+        --arg asin         "$(grep -m1 '^ASIN: '         "$info_file" | sed 's/^ASIN: //')" \
+        --arg rating       "$(grep -m1 '^Rating: '       "$info_file" | sed 's/^Rating: //')" \
+        --arg description  "$ex_description" \
+        '{title:$title, author:$author, series:$series, series_number:$series_num,
+          narrator:$narrator, publisher:$publisher, duration:$duration,
+          release_date:$release_date, asin:$asin, rating:$rating, description:$description}')
+
+    # Merge: scraped fields take priority over existing
+    local merged_json
+    merged_json=$(jq -n \
+        --argjson e "$existing_json" \
+        --argjson s "$scraped_json" \
+        '{
+            title:        ($s.title        // $e.title        // ""),
+            author:       ($s.author       // $e.author       // ""),
+            series:       ($s.series       // $e.series       // ""),
+            series_number:($s.series_number// $e.series_number// ""),
+            narrator:     ($s.narrator     // $e.narrator     // ""),
+            publisher:    ($s.publisher    // $e.publisher    // ""),
+            duration:     ($e.duration     // ""),
+            release_date: ($s.release_date // $e.release_date // ""),
+            asin:         ($e.asin         // ""),
+            rating:       ($s.rating       // $e.rating       // ""),
+            cover_url:    ($s.cover_url    // ""),
+            description:  ($s.description  // $e.description  // "")
+        }')
+
+    # Write updated plain-text .info file
+    local m_title m_author m_series m_series_num m_narrator m_publisher
+    local m_duration m_release_date m_asin m_rating m_description
+    m_title=$(jq -r '.title // ""'        <<< "$merged_json")
+    m_author=$(jq -r '.author // ""'      <<< "$merged_json")
+    m_series=$(jq -r '.series // ""'      <<< "$merged_json")
+    m_series_num=$(jq -r '.series_number // ""' <<< "$merged_json")
+    m_narrator=$(jq -r '.narrator // ""'  <<< "$merged_json")
+    m_publisher=$(jq -r '.publisher // ""' <<< "$merged_json")
+    m_duration=$(jq -r '.duration // ""'  <<< "$merged_json")
+    m_release_date=$(jq -r '.release_date // ""' <<< "$merged_json")
+    m_asin=$(jq -r '.asin // ""'          <<< "$merged_json")
+    m_rating=$(jq -r '.rating // ""'      <<< "$merged_json")
+    m_description=$(jq -r '.description // ""' <<< "$merged_json")
+
+    {
+        echo "================================================================================"
+        echo "AUDIOBOOK INFORMATION"
+        echo "================================================================================"
+        echo
+        echo "Title: ${m_title:-Unknown}"
+        echo "Author: ${m_author:-Unknown}"
+        [[ -n "$m_series" ]]       && echo "Series: ${m_series}${m_series_num:+ #${m_series_num}}"
+        [[ -n "$m_narrator" ]]     && echo "Narrator: ${m_narrator}"
+        [[ -n "$m_publisher" ]]    && echo "Publisher: ${m_publisher}"
+        [[ -n "$m_duration" ]]     && echo "Duration: ${m_duration}"
+        [[ -n "$m_release_date" ]] && echo "Release Date: ${m_release_date}"
+        [[ -n "$m_asin" ]]         && echo "ASIN: ${m_asin}"
+        [[ -n "$m_rating" ]]       && echo "Rating: ${m_rating}"
+        echo
+        echo "================================================================================"
+        echo "DESCRIPTION"
+        echo "================================================================================"
+        echo
+        if [[ -n "$m_description" && "$m_description" != "null" ]]; then
+            echo "$m_description" | fold -s -w 80
+        else
+            echo "No description available."
         fi
-        return 0
+        echo
+        echo "================================================================================"
+        echo "TECHNICAL METADATA"
+        echo "================================================================================"
+        echo
+        echo "Processing Date: $(date '+%Y-%m-%d %H:%M:%S')"
+        echo "Generated by: ccab Audiobook Toolkit"
+        echo
+    } > "$info_file" || { log_error "Failed to write updated info file"; return 1; }
+
+    log_info "Updated info file: $(basename "$info_file")"
+
+    # Re-download cover art if cover_url was scraped
+    local new_cover
+    new_cover=$(jq -r '.cover_url // ""' <<< "$scraped_json")
+    if [[ -n "$new_cover" && "$new_cover" != "null" ]]; then
+        local cover_dest
+        cover_dest="$(dirname "$info_file")/$(basename "${info_file%.info}").jpg"
+        curl -s -L --max-time 30 --max-filesize "10M" \
+             --user-agent "ccab/2.0" -o "$cover_dest" "$new_cover" && \
+            log_info "Cover art updated: $(basename "$cover_dest")"
     fi
-    log_error "Failed to write updated info file"
-    return 1
+    return 0
 }
 
 # ---------------------------------------------------------------------------
