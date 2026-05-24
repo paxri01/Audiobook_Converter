@@ -88,32 +88,6 @@ install_ccab()
         warn "Config already exists — not overwritten: $INSTALL_CONF/smart-ccab.conf"
     fi
 
-    # Install bash completion
-    local bash_comp_dir=""
-    if [[ -d "$HOME/.local/share/bash-completion/completions" ]]; then
-        bash_comp_dir="$HOME/.local/share/bash-completion/completions"
-    elif [[ -d /etc/bash_completion.d ]]; then
-        bash_comp_dir="/etc/bash_completion.d"
-    fi
-
-    if [[ -n "$bash_comp_dir" ]]; then
-        install -m 644 "$CCAB_ROOT/completions/ccab.bash" "$bash_comp_dir/ccab"
-        ok "Installed bash completion: $bash_comp_dir/ccab"
-    else
-        warn "Bash completion directory not found — skipping"
-        warn "Manually copy completions/ccab.bash to your bash-completion directory"
-    fi
-
-    # Install zsh completion
-    local zsh_comp_dir="$HOME/.local/share/zsh/site-functions"
-    if [[ -d "$zsh_comp_dir" ]]; then
-        install -m 644 "$CCAB_ROOT/completions/ccab.zsh" "$zsh_comp_dir/_ccab"
-        ok "Installed zsh completion: $zsh_comp_dir/_ccab"
-    else
-        warn "Zsh completion directory not found — skipping"
-        warn "Manually copy completions/ccab.zsh to a \$fpath directory as _ccab"
-    fi
-
     # Log directory
     local log_dir="/var/log/ccab"
     if [[ ! -d "$log_dir" ]]; then
@@ -165,17 +139,6 @@ uninstall_ccab()
         ok "Removed: $lib_dest"
         ((removed++)) || true
     fi
-
-    for comp_dir in \
-        "$HOME/.local/share/bash-completion/completions/ccab" \
-        "/etc/bash_completion.d/ccab" \
-        "$HOME/.local/share/zsh/site-functions/_ccab"; do
-        if [[ -f "$comp_dir" ]]; then
-            rm -f "$comp_dir"
-            ok "Removed: $comp_dir"
-            ((removed++)) || true
-        fi
-    done
 
     warn "Config preserved: $INSTALL_CONF/smart-ccab.conf  (remove manually if desired)"
     echo
